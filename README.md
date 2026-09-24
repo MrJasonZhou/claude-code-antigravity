@@ -19,6 +19,7 @@ Requirements: Node ≥ 18, and `agy` on `PATH` (or set `AGY_BIN`). You must have
 | `/agy:ask <question>` | Read-only questions about the whole codebase, or a second opinion. |
 | `/agy:review` | Structured code review. Targets: uncommitted changes, a branch (`--base`), one commit (`--commit <sha>`), or a GitHub PR (`--pr <n>`, uses `gh`). Findings are sorted by severity and include file:line. |
 | `/agy:adversarial-review` | Review that challenges the design, its assumptions and how it fails in real use. |
+| `/agy:critique <plan or file>` | Adversarial review of a plan, design doc or RFC before any code is written. agy checks each assumption against the actual code. |
 | `/agy:compare <question>` | Ask several models the same question in parallel (default `pro,opus,gpt`, i.e. Gemini, Claude and GPT through agy). Claude then summarizes where they agree and disagree. |
 | `/agy:apply [id]` | Apply the patch from a `--worktree` task. Falls back to a 3-way merge when needed. |
 | `/agy:research <question>` | Answer from live Google Search, with source URLs. |
@@ -52,6 +53,11 @@ Claude can also call the **`agy-delegate`** subagent on its own. It does this fo
 - `--resume-last` continues the last completed agy conversation in this workspace. `--resume <conversation-id>` continues a specific one.
 - `--model <id|pro|flash|opus|sonnet|gpt>` picks a model. An alias resolves to the newest matching model and prefers the `-high` variant.
 - `--effort low|medium|high`, `--add-dir <dir>`, `--timeout <sec>`, `--agent <custom agy agent>`, `--json`.
+
+### What agy is told and what you get back
+
+- **Shared project rules.** agy reads `GEMINI.md` and `AGENTS.md` by itself. The plugin also points it at every `CLAUDE.md` / `CLAUDE.local.md` from the working directory up to the repo root, so both agents follow the same conventions.
+- **Audit trail.** Every result lists the shell commands agy ran, each marked ✓ or ✗. `/agy:status <id>` shows the full timeline of tool calls, including durations and errors.
 
 ## How it works
 

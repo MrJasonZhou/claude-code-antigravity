@@ -36,6 +36,7 @@ Presenting results:
 - Output is Markdown; show it verbatim. Keep file paths, line numbers, source URLs, job ids and the follow-up hint.
 - Reviews: findings are already sorted by severity. After showing them, stop and ask which to fix. Never auto-apply review fixes.
 - Worktree patches: show the stat and ask before running `/agy:apply`.
+- Commands: keep the "Commands agy ran" section when present; it is the audit trail of what agy executed.
 - Compare: show each model's answer, then synthesize agreements/disagreements.
 - Edits: when "Files agy edited" is present, say so, then verify (diff, tests) before calling the work done.
 - Failures: show the error block and stop. Do not quietly redo agy's task yourself unless the user asks.

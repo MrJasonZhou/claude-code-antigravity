@@ -41,6 +41,7 @@ const lines = [
   {event:"init",conversation_id:"c-1"},
   {event:"step_update",step_update:{step_type:"tool",state:"ACTIVE",tool_name:"write_to_file",tool_info:{parameters:{TargetFile:"/w/a.py"}}}},
   {event:"step_update",step_update:{step_type:"tool",state:"DONE",tool_name:"write_to_file",tool_info:{parameters:{TargetFile:"/w/a.py"}}}},
+  {event:"step_update",step_update:{step_type:"tool",state:"DONE",tool_name:"run_command",duration_seconds:1.5,tool_info:{parameters:{CommandLine:"npm test"}}}},
   {event:"result",result:{conversation_id:"c-1",status:"SUCCESS",response:"did it",duration_seconds:3,usage:{total_tokens:42},denied_actions:[{action:"command",display_name:"RunCommand"}]}}];
 let input=""; process.stdin.on("data",d=>input+=d); process.stdin.on("end",()=>{
   if(!input.includes("WORKSPACE ROOT")) process.exit(9);
@@ -53,6 +54,9 @@ assert.match(out, /# agy task — completed/);
 assert.match(out, /did it/);
 assert.match(out, /- \/w\/a\.py/);
 assert.match(out, /tried a tool this run's policy does not permit: RunCommand/);
+assert.match(out, /## Commands agy ran\n- ✓ `npm test`/);
+const jid = /Job: `([^`]+)`/.exec(out)[1];
+assert.match(execFileSync("node", [COMPANION, "status", jid], { cwd: tmp, env, encoding: "utf8" }), /## Timeline[\s\S]*✓ run_command npm test \(1\.5s\)/);
 
 const status = execFileSync("node", [COMPANION, "status"], { cwd: tmp, env, encoding: "utf8" });
 assert.match(status, /\| task \| completed \|/);
@@ -166,6 +170,13 @@ assert.match(execFileSync("node", [COMPANION, "task", "--prompt-file", path.join
 const bg = execFileSync("node", [COMPANION, "task", "--background", "--prompt-file", path.join(tmp, "ctx.txt"), "bg"], { cwd: wrepo, env: wenv, encoding: "utf8" });
 const bgId = /`(task-[^`]+)`/.exec(bg)[1];
 assert.match(execFileSync("node", [COMPANION, "result", bgId, "--wait", "--timeout", "30"], { cwd: wrepo, env: wenv, encoding: "utf8" }), /saw marker/);
+
+// CLAUDE.md is surfaced to agy as project rules
+fs.writeFileSync(path.join(wrepo, "CLAUDE.md"), "rules");
+const seen = path.join(tmp, "seen.txt");
+fs.writeFileSync(path.join(tmp, "cat-agy"), `#!/bin/sh\ncat > ${seen}\n`, { mode: 0o755 });
+execFileSync("node", [COMPANION, "task", "hi"], { cwd: wrepo, env: { ...process.env, AGY_BIN: path.join(tmp, "cat-agy") } });
+assert.match(fs.readFileSync(seen, "utf8"), new RegExp(`PROJECT RULES: read ${path.join(wrepo, "CLAUDE.md")}`));
 
 // agy exiting before reading its prompt (EPIPE) fails the job instead of crashing the companion
 const big = path.join(tmp, "big.txt");

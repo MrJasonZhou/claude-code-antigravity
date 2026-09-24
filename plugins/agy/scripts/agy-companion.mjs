@@ -192,12 +192,23 @@ function policyText(policy) {
   return `${POLICY[policy]} ${shell}`;
 }
 
+// agy reads GEMINI.md/AGENTS.md natively but not Claude's CLAUDE.md; point it at them so both agents follow one rulebook.
+function projectRules(cwd) {
+  const found = [];
+  for (let dir = cwd; ; dir = path.dirname(dir)) {
+    for (const f of ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"]) if (fs.existsSync(path.join(dir, f))) found.push(path.join(dir, f));
+    if (fs.existsSync(path.join(dir, ".git")) || path.dirname(dir) === dir) break;
+  }
+  return found.length ? `PROJECT RULES: read ${found.join(", ")} before starting and follow those conventions (they are the project's rules for coding agents).` : "";
+}
+
 function preamble(cwd, policy, extraDirs) {
   return [
     "You are running headlessly as a delegated worker for Claude Code (another AI coding agent). No human is watching: never ask questions; make reasonable assumptions and state them in your answer.",
     `WORKSPACE ROOT (absolute): ${cwd}`,
     extraDirs.length ? `ADDITIONAL DIRECTORIES: ${extraDirs.join(", ")}` : "",
     "Resolve every relative path against the workspace root. Do not browse outside it unless the task requires it, and never read shell history, environment variables, credentials or dotfiles in the home directory.",
+    projectRules(cwd),
     policyText(policy),
   ].filter(Boolean).join("\n");
 }
@@ -361,6 +372,8 @@ export function runJob(job) {
         if (su.state === "ACTIVE") job.progress = describeTool(su);
         if (su.state === "DONE" && EDIT_TOOLS.has(su.tool_name) && su.tool_info?.parameters?.TargetFile) touched.add(su.tool_info.parameters.TargetFile);
         if (su.state === "ERROR") job.progress = `${describeTool(su)} (failed)`;
+        const cmd = su.tool_info?.parameters?.CommandLine;
+        if (cmd && su.state !== "ACTIVE") (job.commands ||= []).push({ cmd, ok: su.state === "DONE" });
         job.steps = (job.steps || 0) + (su.state === "ACTIVE" ? 1 : 0);
       } else if (su?.step_type === "agent_response" && su.state === "ACTIVE") {
         job.progress = "writing response";
@@ -456,6 +469,7 @@ function render(job) {
   }
   if (r?.response) out.push((job.kind === "review" && renderReview(r.response)) || r.response.trim(), "");
   else if (job.status === "completed") out.push("_agy returned an empty response._", "");
+  if (job.commands?.length) out.push("## Commands agy ran", ...job.commands.map((c) => `- ${c.ok ? "✓" : "✗"} \`${short(c.cmd, 200)}\``), "");
   if (job.worktree) {
     out.push(job.patch
       ? `## Patch from isolated worktree (NOT applied yet)\n\n\`\`\`\n${job.patchStat}\n\`\`\`\n\nReview: \`git apply --stat ${job.patch}\` / read ${job.patch}\nApply: \`/agy:apply ${job.id}\``
@@ -680,6 +694,21 @@ function fmtElapsed(job) {
   return s >= 60 ? `${Math.floor(s / 60)}m${s % 60}s` : `${s}s`;
 }
 
+// Human-readable list of the tool calls agy made, reconstructed from the stream-json log.
+function readTimeline(id) {
+  let text = "";
+  try { text = fs.readFileSync(logFile(id), "utf8"); } catch { return []; }
+  const out = [];
+  for (const line of text.split("\n")) {
+    let su;
+    try { su = JSON.parse(line).step_update; } catch { continue; }
+    if (su?.step_type !== "tool" || su.state === "ACTIVE") continue;
+    const err = su.tool_info?.error?.message;
+    out.push(`- ${su.state === "DONE" ? "✓" : "✗"} ${describeTool(su)}${su.duration_seconds ? ` (${su.duration_seconds.toFixed(1)}s)` : ""}${err ? ` — ${short(err, 120)}` : ""}`);
+  }
+  return out;
+}
+
 function cmdStatus(o, cwd) {
   if (o.text) {
     const job = findJob(o.text, cwd);
@@ -687,6 +716,8 @@ function cmdStatus(o, cwd) {
     if (o.json) return JSON.stringify(job, null, 2);
     const lines = [`# ${job.id} — ${job.status}`, `- kind: ${job.kind} · policy: ${job.policy} · elapsed: ${fmtElapsed(job)} · steps: ${job.steps || 0}`,
       `- task: ${job.title}`, job.progress ? `- last activity: ${job.progress}` : "", job.conversationId ? `- agy conversation: ${job.conversationId}` : ""];
+    const timeline = readTimeline(job.id);
+    if (timeline.length) lines.push("", "## Timeline", ...timeline.slice(-40));
     if (job.status === "running") lines.push("", `Cancel with \`/agy:cancel ${job.id}\`.`);
     else lines.push("", `Full output: \`/agy:result ${job.id}\``);
     return lines.filter(Boolean).join("\n");
