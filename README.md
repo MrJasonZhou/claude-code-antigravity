@@ -57,6 +57,8 @@ Claude can also call the **`agy-delegate`** subagent on its own. It does this fo
 ### What agy is told and what you get back
 
 - **Shared project rules.** agy reads `GEMINI.md` and `AGENTS.md` by itself. The plugin also points it at every `CLAUDE.md` / `CLAUDE.local.md` from the working directory up to the repo root, so both agents follow the same conventions.
+- **Images as input.** agy is multimodal. Mention a screenshot, mockup or diagram by its path in any task, for example "implement design/mock.png" or "why is the chart in bug.png empty?".
+- **Browser checks.** agy has browser tools. Where Chrome is installed, a `--yolo` task can open your dev server, click through it and take screenshots.
 - **Audit trail.** Every result lists the shell commands agy ran, each marked ✓ or ✗. `/agy:status <id>` shows the full timeline of tool calls, including durations and errors.
 
 ## How it works

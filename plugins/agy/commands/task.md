@@ -32,6 +32,7 @@ Run exactly one Bash call (foreground calls need `timeout: 600000`):
 node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" task "<flags> <task text>"
 ```
 - Large context (logs, stack traces, specs over a few KB): write it to a file in the scratchpad and pass `--prompt-file <path>` instead of inlining it.
+- Images: agy is multimodal. Reference screenshots, mockups or diagrams by path in the task text (e.g. "implement the layout in design/mock.png", "why does screenshot.png show a blank chart?"); it can view them in any mode.
 - Keep the user's task text as written. You may prepend a short line of essential context you already know (relevant file paths, the error message) — do not investigate the repo to build it.
 
 After it returns:
