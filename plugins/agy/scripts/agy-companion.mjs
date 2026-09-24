@@ -458,6 +458,7 @@ function prContext(cwd, pr) {
 // agy runs in its own process group so cancel can stop it together with every test runner or server it
 // started. Groups owned by this process are killed if we are terminated or exit.
 const activeGroups = new Set();
+const lingering = new Set(); // groups TERMed after agy exited, pending a KILL if they ignore it
 let signalsHooked = false;
 
 function groupAlive(pgid) {
@@ -472,7 +473,10 @@ function trackGroup(pid) {
   activeGroups.add(pid);
   if (signalsHooked) return;
   signalsHooked = true;
-  const killAll = () => { for (const g of activeGroups) signalGroup(g, "SIGTERM"); };
+  const killAll = () => {
+    for (const g of activeGroups) signalGroup(g, "SIGTERM");
+    for (const g of lingering) if (groupAlive(g)) signalGroup(g, "SIGKILL"); // we are exiting: no grace left
+  };
   process.on("exit", killAll);
   for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(sig, () => { killAll(); process.exit(128 + (sig === "SIGINT" ? 2 : sig === "SIGHUP" ? 1 : 15)); });
 }
@@ -546,6 +550,15 @@ export function runJob(job) {
     const touched = new Set();
     let buf = "", stderr = "", result = null, lastSave = 0;
     child.on("error", (e) => { stderr += `failed to start agy: ${e.message}\n`; });
+    // agy is done: stop anything it left running in its group (dev servers, watchers). This must happen on
+    // "exit", not "close": a leftover process holding agy's stdout would otherwise keep "close" from ever firing.
+    // TERM first, KILL after a grace period. The pid cannot be reused while the group still exists.
+    child.on("exit", () => {
+      if (!child.pid || !groupAlive(child.pid)) return;
+      signalGroup(child.pid, "SIGTERM");
+      lingering.add(child.pid);
+      setTimeout(() => { if (groupAlive(child.pid)) signalGroup(child.pid, "SIGKILL"); lingering.delete(child.pid); }, 5000).unref();
+    });
 
     const onLine = (line) => {
       if (!line.trim()) return;
@@ -577,9 +590,6 @@ export function runJob(job) {
     child.on("close", (code) => {
       onLine(buf);
       log.end();
-      // agy is done: stop anything it left running in its group (dev servers, watchers) so no ports or
-      // processes leak. The pid cannot have been reused while the group still exists.
-      if (child.pid && groupAlive(child.pid)) signalGroup(child.pid, "SIGTERM");
       activeGroups.delete(child.pid);
       if (fs.existsSync(cancelFile(job.id))) return finalizeCancelled();
       job.exitCode = code;

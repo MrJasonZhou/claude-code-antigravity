@@ -398,11 +398,25 @@ const daemonPidFile = path.join(tmp, "daemon.pid");
 const daemonAgy = path.join(tmp, "daemon-agy");
 fs.writeFileSync(daemonAgy, `#!/bin/sh
 cat >/dev/null
-sleep 300 >/dev/null 2>&1 & echo $! > ${daemonPidFile}
+(trap '' TERM; exec sleep 300) & echo $! > ${daemonPidFile}
 echo '{"event":"result","result":{"conversation_id":"dm","status":"SUCCESS","response":"started server"}}'
 `, { mode: 0o755 });
 assert.match(execFileSync("node", [COMPANION, "task", "serve"], { cwd: wrepo, env: { ...process.env, AGY_BIN: daemonAgy }, encoding: "utf8" }), /completed/);
 execFileSync("sleep", ["0.3"]);
 assert.throws(() => process.kill(Number(fs.readFileSync(daemonPidFile, "utf8")), 0));
+
+// a TERM-ignoring leftover that does NOT hold agy's pipes is still killed when the companion exits early
+const quietPidFile = path.join(tmp, "quiet.pid");
+const quietAgy = path.join(tmp, "quiet-agy");
+fs.writeFileSync(quietAgy, `#!/bin/sh
+cat >/dev/null
+(trap '' TERM; exec sleep 300) >/dev/null 2>&1 & echo $! > ${quietPidFile}
+echo '{"event":"result","result":{"conversation_id":"q","status":"SUCCESS","response":"ok"}}'
+`, { mode: 0o755 });
+const tq = Date.now();
+execFileSync("node", [COMPANION, "task", "quiet"], { cwd: wrepo, env: { ...process.env, AGY_BIN: quietAgy }, encoding: "utf8" });
+assert.ok(Date.now() - tq < 4000); // did not wait for the grace period
+execFileSync("sleep", ["0.3"]);
+assert.throws(() => process.kill(Number(fs.readFileSync(quietPidFile, "utf8")), 0));
 
 console.log("ok");
