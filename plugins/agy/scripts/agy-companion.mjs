@@ -200,15 +200,33 @@ function writeJsonAtomic(file, data) {
   fs.renameSync(tmp, file);
 }
 
-// Read-modify-write under an O_EXCL lock file; a lock older than 30s is treated as stale.
+const readLock = (lock) => { try { return fs.readFileSync(lock, "utf8"); } catch { return null; } };
+
+// A lock is stale only if its holder is gone (pid + start time), or if it is an empty lock that outlived a
+// crash between create and write. Before removing it we re-read it, so a lock another process just took
+// over is never deleted by a second would-be stealer.
+function lockIsStale(lock, owner) {
+  if (owner === null) return false;
+  const [pid, start] = owner.split(" ");
+  if (!pid) { try { return Date.now() - fs.statSync(lock).mtimeMs > 30_000; } catch { return false; } }
+  return !sameProcess(Number(pid), start === "null" ? null : start);
+}
+
+// Read-modify-write under an O_EXCL lock file that records its holder.
 function updateJson(file, mutate) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const lock = `${file}.lock`;
+  const me = `${process.pid} ${procStart(process.pid)}`;
   const deadline = Date.now() + 10_000;
   for (;;) {
-    try { fs.closeSync(fs.openSync(lock, "wx")); break; } catch (e) {
+    try {
+      const fd = fs.openSync(lock, "wx");
+      try { fs.writeSync(fd, me); } finally { fs.closeSync(fd); }
+      break;
+    } catch (e) {
       if (e.code !== "EEXIST") throw e;
-      try { if (Date.now() - fs.statSync(lock).mtimeMs > 30_000) { fs.rmSync(lock, { force: true }); continue; } } catch {}
+      const owner = readLock(lock);
+      if (lockIsStale(lock, owner) && readLock(lock) === owner) { fs.rmSync(lock, { force: true }); continue; }
       if (Date.now() > deadline) throw new Error(`timed out waiting for lock ${lock}`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
     }
@@ -218,7 +236,7 @@ function updateJson(file, mutate) {
     mutate(data);
     writeJsonAtomic(file, data);
     return data;
-  } finally { fs.rmSync(lock, { force: true }); }
+  } finally { if (readLock(lock) === me) fs.rmSync(lock, { force: true }); }
 }
 
 // ---------- agy command allowlist (persistent, in agy's own settings.json) ----------
@@ -469,13 +487,20 @@ function signalGroup(pid, sig) {
   try { process.kill(-pid, sig); return true; } catch { try { process.kill(pid, sig); return true; } catch { return false; } }
 }
 
+// After agy (the group leader) has exited, its pid is free: a live process with that pid is someone else.
+// Our leftovers are exactly "group still exists, leader pid not alive" (Linux never reuses a pid that is
+// still a process-group id, so such a group can only be agy's).
+const leftoverGroup = (pgid) => groupAlive(pgid) && !isAlive(pgid);
+// Signal the group only — never fall back to the (possibly reused) leader pid.
+const killLeftovers = (pgid, sig) => { if (leftoverGroup(pgid)) try { process.kill(-pgid, sig); } catch {} };
+
 function trackGroup(pid) {
   activeGroups.add(pid);
   if (signalsHooked) return;
   signalsHooked = true;
   const killAll = () => {
     for (const g of activeGroups) signalGroup(g, "SIGTERM");
-    for (const g of lingering) if (groupAlive(g)) signalGroup(g, "SIGKILL"); // we are exiting: no grace left
+    for (const g of lingering) killLeftovers(g, "SIGKILL"); // we are exiting: no grace left
   };
   process.on("exit", killAll);
   for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(sig, () => { killAll(); process.exit(128 + (sig === "SIGINT" ? 2 : sig === "SIGHUP" ? 1 : 15)); });
@@ -554,10 +579,11 @@ export function runJob(job) {
     // "exit", not "close": a leftover process holding agy's stdout would otherwise keep "close" from ever firing.
     // TERM first, KILL after a grace period. The pid cannot be reused while the group still exists.
     child.on("exit", () => {
-      if (!child.pid || !groupAlive(child.pid)) return;
-      signalGroup(child.pid, "SIGTERM");
+      activeGroups.delete(child.pid);
+      if (!child.pid || !leftoverGroup(child.pid)) return;
+      killLeftovers(child.pid, "SIGTERM");
       lingering.add(child.pid);
-      setTimeout(() => { if (groupAlive(child.pid)) signalGroup(child.pid, "SIGKILL"); lingering.delete(child.pid); }, 5000).unref();
+      setTimeout(() => { killLeftovers(child.pid, "SIGKILL"); lingering.delete(child.pid); }, 5000).unref();
     });
 
     const onLine = (line) => {
