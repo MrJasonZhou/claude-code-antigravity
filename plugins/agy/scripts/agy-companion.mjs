@@ -258,7 +258,11 @@ export function validateAllowCommand(cmd) {
   const c = String(cmd || "").trim().replace(/\s+/g, " ");
   if (!c) throw new Error("empty command");
   if (/[;&|`$<>(){}\\\n'"]/.test(c)) throw new Error(`"${c}": shell metacharacters and quotes are not allowed in an allow rule`);
-  const [first, ...args] = c.split(" ");
+  // Leading NAME=value assignments ("CI=1 npm test") are skipped: the command after them is what gets judged.
+  const words = c.split(" ");
+  while (words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])) words.shift();
+  if (!words.length) throw new Error(`"${c}" has no command after its environment assignments`);
+  const [first, ...args] = words;
   const tool = path.basename(first);
   // For interpreters, any inline-code flag (python -u -c) or a trailing option whose value would be free
   // (python3 -m, node --require) makes the prefix open-ended.
@@ -972,7 +976,10 @@ async function cmdCancel(o, cwd) {
   const ownerGone = (j) => (j.pid ? !sameProcess(j.pid, j.pidStart) : Date.now() - Date.parse(j.createdAt) > 60_000);
   await waitUntil(() => { const j = loadJob(job.id); return !j || j.status !== "queued" || ownerGone(j); }, 10_000);
   const { agyPid, agyStart } = loadJob(job.id) || {};
-  if (agyPid && sameProcess(agyPid, agyStart) && groupAlive(agyPid)) {
+  // Leader alive: it must be our agy (pid reuse). Leader gone but group alive: the group is agy's leftover
+  // children (Linux never hands out a pid still used as a process-group id), so it is ours to stop.
+  const ours = agyPid && groupAlive(agyPid) && (isAlive(agyPid) ? sameProcess(agyPid, agyStart) : true);
+  if (ours) {
     signalGroup(agyPid, "SIGTERM");
     // Judge by the whole group, not the leader: a child that ignores TERM must still be killed.
     if (!(await waitUntil(() => !groupAlive(agyPid), 5000))) signalGroup(agyPid, "SIGKILL");
@@ -1160,7 +1167,10 @@ async function hookStop(input) {
   // Same state as last time: an ALLOW stands, and so does a BLOCK (until the consecutive-block cap).
   if (st.hash === hash) {
     if (st.verdict !== "block") return;
-    if (st.blocks >= GATE_MAX_BLOCKS) return giveUp();
+    if (st.blocks >= GATE_MAX_BLOCKS) {
+      giveUp();
+      return saveGateState(key, { hash, verdict: "allow", blocks: 0 }); // the next new state gets a fresh review
+    }
     saveGateState(key, { ...st, blocks: st.blocks + 1 });
     return block(st.reason, st.jobId);
   }

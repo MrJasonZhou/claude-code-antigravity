@@ -114,6 +114,10 @@ assert.match(JSON.parse(stop()).reason, /off by one/);
 assert.match(JSON.parse(stop()).reason, /off by one/);
 assert.equal(stop(), "");
 assert.equal(fs.readFileSync(path.join(tmp, "gate-calls"), "utf8"), "x");
+// after giving up, the next different state is reviewed again (not skipped by a stale cap)
+fs.writeFileSync(path.join(repo, "a.py"), "x = 2\n");
+assert.equal(JSON.parse(stop()).decision, "block");
+assert.equal(fs.readFileSync(path.join(tmp, "gate-calls"), "utf8"), "xx");
 // A change beyond the prompt's truncation window still changes the fingerprint.
 const fp1 = m.worktreeFingerprint(repo);
 fs.writeFileSync(path.join(repo, "big.bin"), Buffer.alloc(700_000, 1));
@@ -124,10 +128,11 @@ fs.rmSync(path.join(repo, "big.bin"));
 
 // allowlist validation
 assert.equal(m.validateAllowCommand("  npm   test "), "npm test");
-for (const bad of ["python3", "bash -c", "sh", "python3 -c", "node -e", "perl -E", "find . -name x", "env FOO=1", "sudo npm test", "/bin/bash -c", "npx", "git", "curl example.com", "deno eval", "python -u -c", "python3 -m", "node --require", "perl -w -e", "/bin/busybox sh", "npm", "npm exec", "npm run", "pnpm dlx", "yarn dlx", "uv run", "uvx ruff", "pipx run", "bun x", "npm --prefix frontend", "pnpm --dir frontend", "yarn --cwd frontend", "npm --prefix=frontend", "cargo --manifest-path a/Cargo.toml", "deno task", "npm --loglevel error", "npm --userconfig .npmrc", "go test -v ./...", "bundle exec", "pipenv run", "composer exec", "hypothetical-pm run", "poetry run", "npm init", "npm innit"]) {
-  assert.throws(() => m.validateAllowCommand(bad), /arbitrary commands|metacharacters/, bad);
+for (const bad of ["python3", "bash -c", "sh", "python3 -c", "node -e", "perl -E", "find . -name x", "env FOO=1", "sudo npm test", "/bin/bash -c", "npx", "git", "curl example.com", "deno eval", "python -u -c", "python3 -m", "node --require", "perl -w -e", "/bin/busybox sh", "npm", "npm exec", "npm run", "pnpm dlx", "yarn dlx", "uv run", "uvx ruff", "pipx run", "bun x", "npm --prefix frontend", "pnpm --dir frontend", "yarn --cwd frontend", "npm --prefix=frontend", "cargo --manifest-path a/Cargo.toml", "deno task", "npm --loglevel error", "npm --userconfig .npmrc", "go test -v ./...", "bundle exec", "pipenv run", "composer exec", "hypothetical-pm run", "poetry run", "npm init", "npm innit", "FOO=1 bash -c", "A=1 B=2 python3 -c", "X=1"]) {
+  assert.throws(() => m.validateAllowCommand(bad), /arbitrary commands|metacharacters|no command/, bad);
 }
-for (const ok of ["npm test", "npm run test", "pytest", "python3 -m unittest", "cargo test", "go test ./...", "npx jest", "git status", "uv run pytest", "npm --prefix frontend test", "yarn --cwd frontend test", "git -C sub status", "deno task test", "bundle exec rspec", "pipenv run pytest", "pytest -q", "rake test"]) assert.equal(m.validateAllowCommand(ok), ok);
+for (const ok of ["npm test", "npm run test", "pytest", "python3 -m unittest", "cargo test", "go test ./...", "npx jest", "git status", "uv run pytest", "npm --prefix frontend test", "yarn --cwd frontend test", "git -C sub status", "deno task test", "bundle exec rspec", "pipenv run pytest", "pytest -q", "rake test"]) assert.ok(m.validateAllowCommand("CI=1 npm test"));
+for (const ok of []) assert.equal(m.validateAllowCommand(ok), ok);
 assert.throws(() => m.validateAllowCommand("npm test && rm -rf /"), /metacharacters/);
 assert.deepEqual(m.allowedCommands({ permissions: { allow: ["command(npm test)", "read_file(/x)", "command(*)"] } }), ["npm test"]);
 
@@ -348,5 +353,22 @@ if [ "$2" = "view" ]; then echo '{"number":7,"title":"t","body":"","baseRefName"
 `, { mode: 0o755 });
 const prCtx = execFileSync("node", ["-e", `import(${JSON.stringify(COMPANION)}).then(m => console.log(m.collectReviewContext(${JSON.stringify(sub)}, { pr: "7" }).root))`], { env: { ...process.env, PATH: `${ghDir}:${process.env.PATH}` }, encoding: "utf8" });
 assert.equal(prCtx.trim(), fs.realpathSync(wrepo));
+
+// cancel when agy itself already exited but a child holding its stdout keeps the job open
+const orphanPidFile = path.join(tmp, "orphan.pid");
+const exitAgy = path.join(tmp, "exit-agy");
+fs.writeFileSync(exitAgy, `#!/bin/sh
+cat >/dev/null
+(trap '' TERM; exec sleep 300) & echo $! > ${orphanPidFile}
+exit 0
+`, { mode: 0o755 });
+const eenv = { ...process.env, AGY_BIN: exitAgy };
+const eid = /`(task-[^`]+)`/.exec(execFileSync("node", [COMPANION, "task", "--background", "orphan"], { cwd: wrepo, env: eenv, encoding: "utf8" }))[1];
+const t1 = Date.now();
+while (!fs.existsSync(orphanPidFile) && Date.now() - t1 < 10_000) execFileSync("sleep", ["0.1"]);
+execFileSync("sleep", ["0.5"]); // let the agy leader exit
+assert.match(execFileSync("node", [COMPANION, "cancel", eid], { cwd: wrepo, env: eenv, encoding: "utf8" }), /Cancelled/);
+assert.throws(() => process.kill(Number(fs.readFileSync(orphanPidFile, "utf8")), 0));
+assert.match(execFileSync("node", [COMPANION, "status", eid], { cwd: wrepo, env: eenv, encoding: "utf8" }), /— cancelled/);
 
 console.log("ok");
