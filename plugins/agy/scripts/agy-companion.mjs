@@ -577,6 +577,9 @@ export function runJob(job) {
     child.on("close", (code) => {
       onLine(buf);
       log.end();
+      // agy is done: stop anything it left running in its group (dev servers, watchers) so no ports or
+      // processes leak. The pid cannot have been reused while the group still exists.
+      if (child.pid && groupAlive(child.pid)) signalGroup(child.pid, "SIGTERM");
       activeGroups.delete(child.pid);
       if (fs.existsSync(cancelFile(job.id))) return finalizeCancelled();
       job.exitCode = code;
@@ -747,12 +750,22 @@ function createWorktree(cwd, id) {
     git(worktree, ["add", "-A"]);
     git(worktree, ["-c", "user.name=agy-plugin", "-c", "user.email=agy-plugin@localhost", "-c", "commit.gpgsign=false",
       "commit", "--no-verify", "--allow-empty", "-q", "-m", "agy-plugin snapshot"]);
-    return { worktree, repoRoot: root, worktreeBase: git(worktree, ["rev-parse", "HEAD"]).trim(), runCwd: path.join(worktree, path.relative(root, cwd)) };
+    // Ignored dependency dirs (node_modules, .venv) are not in git, so link them in: without them agy cannot
+    // run the project's tests in the worktree. The links are excluded from the patch in finalizeWorktree.
+    const depLinks = git(root, ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]).split("\0")
+      .map((d) => d.replace(/\/$/, "")).filter((d) => DEP_DIRS.has(path.basename(d)) && !fs.existsSync(path.join(worktree, d)));
+    for (const d of depLinks) {
+      fs.mkdirSync(path.dirname(path.join(worktree, d)), { recursive: true });
+      fs.symlinkSync(path.join(root, d), path.join(worktree, d));
+    }
+    return { worktree, repoRoot: root, worktreeBase: git(worktree, ["rev-parse", "HEAD"]).trim(), runCwd: path.join(worktree, path.relative(root, cwd)), depLinks };
   } catch (e) {
     removeWorktree(root, worktree);
     throw e;
   }
 }
+
+const DEP_DIRS = new Set(["node_modules", ".venv", "venv"]);
 
 function removeWorktree(root, worktree) {
   try { git(root, ["worktree", "remove", "--force", worktree]); } catch {
@@ -767,7 +780,7 @@ const JUNK = ["__pycache__", "*.pyc", ".pytest_cache", ".mypy_cache", ".ruff_cac
 function finalizeWorktree(job) {
   if (job.result?.response) job.result.response = job.result.response.split(job.runCwd).join(job.cwd).split(job.worktree).join(job.repoRoot);
   try {
-    git(job.worktree, ["add", "-A", "--", ".", ...JUNK.map((p) => `:(exclude,glob)**/${p}`)]);
+    git(job.worktree, ["add", "-A", "--", ".", ...JUNK.map((p) => `:(exclude,glob)**/${p}`), ...(job.depLinks || []).map((d) => `:(exclude,literal)${d}`)]);
     const patch = spawnSync("git", ["diff", "--cached", "--binary", job.worktreeBase], { cwd: job.worktree, maxBuffer: 256 * 1024 * 1024 }).stdout;
     job.patchStat = git(job.worktree, ["diff", "--cached", "--stat", job.worktreeBase]).trim();
     if (patch?.length) {

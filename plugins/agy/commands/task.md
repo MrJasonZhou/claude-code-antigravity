@@ -12,7 +12,7 @@ $ARGUMENTS
 Permission policy (pass through exactly what the user chose):
 - no flag → read-only: agy may read files but not edit or run shell commands. Good for investigation, diagnosis, planning.
 - `--write` → agy may create and edit files in the workspace (no shell commands).
-- `--worktree` → agy edits an isolated git worktree seeded with the current uncommitted and untracked files (symlinks are kept as links); the result is a patch the user applies with `/agy:apply`. Needs at least one commit; refused when a submodule has uncommitted changes. Prefer it when Claude is also editing, for parallel attempts, or for risky changes.
+- `--worktree` → agy edits an isolated git worktree seeded with the current uncommitted and untracked files (symlinks are kept as links; ignored dependency dirs such as node_modules/.venv are linked in so tests can run); the result is a patch the user applies with `/agy:apply`. Needs at least one commit; refused when a submodule has uncommitted changes. Prefer it when Claude is also editing, for parallel attempts, or for risky changes.
 - `--yolo` → agy may also run arbitrary shell commands and fetch URLs. Only pass it when the user explicitly asked for it.
 - `--worktree --models pro,opus` → best-of-N: each model implements the task independently in its own worktree. Present the attempts side by side (approach, diff size, risks), recommend one, and let the user pick which to `/agy:apply`.
 - Commands allowlisted with `/agy:setup --allow-command "<cmd>"` (e.g. the test command) are usable in every mode, so agy can run tests and iterate.

@@ -371,4 +371,38 @@ assert.match(execFileSync("node", [COMPANION, "cancel", eid], { cwd: wrepo, env:
 assert.throws(() => process.kill(Number(fs.readFileSync(orphanPidFile, "utf8")), 0));
 assert.match(execFileSync("node", [COMPANION, "status", eid], { cwd: wrepo, env: eenv, encoding: "utf8" }), /— cancelled/);
 
+// --worktree links ignored dependency dirs so agy can run tests; the links never enter the patch, and
+// removing the worktree must not delete the real node_modules behind the link
+fs.writeFileSync(path.join(wrepo, ".gitignore"), "node_modules/\n");
+g("add", ".gitignore"); g("commit", "-qm", "ignore");
+fs.mkdirSync(path.join(wrepo, "node_modules", "dep"), { recursive: true });
+fs.writeFileSync(path.join(wrepo, "node_modules", "dep", "index.js"), "module.exports = 1;\n");
+const depAgy = path.join(tmp, "dep-agy");
+fs.writeFileSync(depAgy, `#!/usr/bin/env node
+const fs = require("fs");
+if (!fs.existsSync("node_modules/dep/index.js")) process.exit(5);
+fs.writeFileSync("c.txt", "c\\n");
+console.log(JSON.stringify({event:"result",result:{conversation_id:"d",status:"SUCCESS",response:"ok"}}));
+`, { mode: 0o755 });
+const dout = execFileSync("node", [COMPANION, "task", "--worktree", "use deps"], { cwd: wrepo, env: { ...process.env, AGY_BIN: depAgy }, encoding: "utf8" });
+assert.match(dout, /completed/);
+const did = /Job: `([^`]+)`/.exec(dout)[1];
+const dpatch = fs.readFileSync(path.join(process.env.AGY_PLUGIN_DATA, "jobs", `${did}.patch`), "utf8");
+assert.match(dpatch, /c\.txt/);
+assert.doesNotMatch(dpatch, /node_modules/);
+assert.ok(fs.existsSync(path.join(wrepo, "node_modules", "dep", "index.js"))); // real deps untouched
+assert.equal(g("worktree", "list").trim().split("\n").length, 1);
+
+// a background process agy leaves behind is stopped when agy finishes
+const daemonPidFile = path.join(tmp, "daemon.pid");
+const daemonAgy = path.join(tmp, "daemon-agy");
+fs.writeFileSync(daemonAgy, `#!/bin/sh
+cat >/dev/null
+sleep 300 >/dev/null 2>&1 & echo $! > ${daemonPidFile}
+echo '{"event":"result","result":{"conversation_id":"dm","status":"SUCCESS","response":"started server"}}'
+`, { mode: 0o755 });
+assert.match(execFileSync("node", [COMPANION, "task", "serve"], { cwd: wrepo, env: { ...process.env, AGY_BIN: daemonAgy }, encoding: "utf8" }), /completed/);
+execFileSync("sleep", ["0.3"]);
+assert.throws(() => process.kill(Number(fs.readFileSync(daemonPidFile, "utf8")), 0));
+
 console.log("ok");
