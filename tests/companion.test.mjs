@@ -67,4 +67,43 @@ const repo = fs.mkdtempSync(path.join(os.tmpdir(), "agy-repo-"));
 execFileSync("git", ["init", "-q"], { cwd: repo });
 assert.match(execFileSync("node", [COMPANION, "review", "--scope working-tree"], { cwd: repo, env, encoding: "utf8" }), /Nothing to review/);
 
+// condenseTranscript: keeps user/assistant text + tool one-liners, drops meta/thinking, tracks edited files
+const jsonl = [
+  { type: "user", isMeta: true, message: { content: "meta" } },
+  { type: "user", message: { content: "build a thing" } },
+  { type: "assistant", message: { content: [{ type: "thinking", thinking: "secret" }, { type: "text", text: "on it" },
+    { type: "tool_use", name: "Edit", input: { file_path: "/w/x.py" } }] } },
+  { type: "user", message: { content: [{ type: "tool_result", content: "boom", is_error: true }] } },
+  { type: "summary" },
+].map((e) => JSON.stringify(e)).join("\n");
+const t = m.condenseTranscript(jsonl);
+assert.deepEqual(t.edited, ["/w/x.py"]);
+assert.match(t.body, /USER: build a thing/);
+assert.match(t.body, /CLAUDE used Edit: \/w\/x\.py/);
+assert.match(t.body, /ERROR: boom/);
+assert.doesNotMatch(t.body, /secret|meta/);
+
+// parseGate
+assert.deepEqual(m.parseGate("ALLOW: fine"), { allow: true });
+assert.equal(m.parseGate("BLOCK: bug\n- a.py:1").allow, false);
+assert.equal(m.parseGate("hmm"), null);
+
+// Stop hook: disabled -> silent; enabled -> fake agy BLOCKs once, same tree state is not re-reviewed.
+const gateAgy = path.join(tmp, "gate-agy");
+fs.writeFileSync(gateAgy, `#!/usr/bin/env node
+require("fs").appendFileSync(${JSON.stringify(path.join(tmp, "gate-calls"))}, "x");
+console.log(JSON.stringify({event:"result",result:{conversation_id:"g",status:"SUCCESS",response:"BLOCK: off by one\\n- a.py:1 — bug — fix"}}));
+`, { mode: 0o755 });
+fs.writeFileSync(path.join(repo, "a.py"), "x = 1\n");
+const genv = { ...process.env, AGY_BIN: gateAgy };
+const stop = () => execFileSync("node", [COMPANION, "hook-stop"], { cwd: repo, env: genv, encoding: "utf8", input: JSON.stringify({ cwd: repo, session_id: "s1" }) });
+assert.equal(stop(), "");
+execFileSync("node", [COMPANION, "setup", "--enable-review-gate"], { cwd: repo, env: genv });
+fs.rmSync(path.join(tmp, "gate-calls")); // setup itself calls agy for version/quota/models
+const blocked = JSON.parse(stop());
+assert.equal(blocked.decision, "block");
+assert.match(blocked.reason, /off by one/);
+assert.equal(stop(), ""); // unchanged tree: not reviewed again
+assert.equal(fs.readFileSync(path.join(tmp, "gate-calls"), "utf8"), "x");
+
 console.log("ok");

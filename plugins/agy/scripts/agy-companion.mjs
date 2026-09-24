@@ -41,8 +41,8 @@ export function tokenize(str) {
   return out;
 }
 
-const BOOL = new Set(["write", "yolo", "background", "wait", "json", "resume-last", "fresh", "adversarial", "all", "keep"]);
-const VALUE = new Set(["model", "effort", "resume", "add-dir", "timeout", "base", "scope", "out", "agent"]);
+const BOOL = new Set(["write", "yolo", "background", "wait", "json", "resume-last", "fresh", "adversarial", "all", "keep", "enable-review-gate", "disable-review-gate"]);
+const VALUE = new Set(["model", "effort", "resume", "add-dir", "timeout", "base", "scope", "out", "agent", "source"]);
 
 export function parseArgs(tokens) {
   const opts = { "add-dir": [] }, rest = [];
@@ -255,7 +255,7 @@ function buildAgyArgs(o, policy, models) {
 
 // Latest finished conversation worth continuing (cancelled/failed runs are skipped).
 function lastResumable(cwd) {
-  return listJobs(cwd).find((x) => x.conversationId && x.status === "completed" && ["task", "research"].includes(x.kind));
+  return listJobs(cwd).find((x) => x.conversationId && x.status === "completed" && ["task", "research", "transfer"].includes(x.kind));
 }
 
 function short(v, n = 80) {
@@ -394,7 +394,8 @@ function render(job) {
   else if (job.status === "completed") out.push("_agy returned an empty response._", "");
   if (job.touchedFiles?.length) out.push("## Files agy edited", ...job.touchedFiles.map((f) => `- ${f}`), "");
   if (job.artifacts?.length) out.push("## agy artifacts", ...job.artifacts.map((f) => `- ${f}`), "");
-  if (job.conversationId && job.kind !== "review") out.push(`_Follow up in the same agy conversation with \`/agy:task --resume-last <instructions>\`._`);
+  if (job.kind === "transfer" && job.conversationId) out.push(`Continue interactively in agy: \`agy --conversation ${job.conversationId}\` (run it from ${job.cwd}).`);
+  if (job.conversationId && !["review", "gate"].includes(job.kind)) out.push(`_Follow up in the same agy conversation with \`/agy:task --resume-last <instructions>\`._`);
   return out.join("\n").trim();
 }
 
@@ -517,7 +518,13 @@ function cmdResumeCandidate(o, cwd) {
   return JSON.stringify(res);
 }
 
-function cmdSetup(o) {
+function cmdSetup(o, cwd) {
+  if (o["enable-review-gate"] || o["disable-review-gate"]) {
+    const cfg = loadConfig();
+    cfg.reviewGate = cfg.reviewGate || {};
+    if (o["enable-review-gate"]) cfg.reviewGate[cwd] = true; else delete cfg.reviewGate[cwd];
+    saveConfig(cfg);
+  }
   const bin = findAgy();
   const report = { node: process.version, agy: bin, version: null, authenticated: false, quota: null, models: [], dataDir: DATA_DIR };
   if (bin) {
@@ -539,11 +546,169 @@ function cmdSetup(o) {
     if (report.models.length) lines.push("", "## Models (use with --model, or aliases: pro, flash, opus, sonnet, gpt)", "", ...report.models.map((m) => `- ${m}`));
     if (report.error) lines.push("", "## Error", "```", report.error, "```");
   }
+  lines.push("", `- stop-time review gate for ${cwd}: ${loadConfig().reviewGate?.[cwd] ? "ENABLED" : "disabled"} (toggle with --enable-review-gate / --disable-review-gate)`);
   lines.push("", `Job data: ${DATA_DIR}`);
   return lines.join("\n");
 }
 
-const COMMANDS = { task: cmdTask, review: cmdReview, research: cmdResearch, image: cmdImage, status: cmdStatus, result: cmdResult, cancel: cmdCancel, setup: cmdSetup, "resume-candidate": cmdResumeCandidate };
+// ---------- config ----------
+
+const CONFIG_FILE = path.join(DATA_DIR, "config.json");
+
+function loadConfig() {
+  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")); } catch { return {}; }
+}
+
+function saveConfig(cfg) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+}
+
+// ---------- Claude session -> agy transfer ----------
+
+const CLAUDE_PROJECTS = path.join(os.homedir(), ".claude", "projects");
+const TRANSFER_BUDGET = 200_000; // chars; the head keeps the original goal, the tail keeps the current state.
+
+function resolveTranscript(src) {
+  if (!src) throw new Error("could not identify the current Claude transcript (the SessionStart hook sets it); pass --source <path-to-session.jsonl>");
+  const p = src.startsWith("~/") ? path.join(os.homedir(), src.slice(2)) : path.resolve(src);
+  if (path.extname(p) !== ".jsonl") throw new Error(`Claude transcript must be a .jsonl file: ${p}`);
+  let real;
+  try { real = fs.realpathSync(p); } catch { throw new Error(`Claude transcript not found: ${p}`); }
+  const rel = path.relative(fs.realpathSync(CLAUDE_PROJECTS), real);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`only transcripts under ${CLAUDE_PROJECTS} can be transferred: ${real}`);
+  return real;
+}
+
+const EDIT_TOOL_NAMES = /^(Edit|Write|MultiEdit|NotebookEdit)$/;
+
+export function condenseTranscript(text) {
+  const lines = [], edited = new Set();
+  for (const raw of text.split("\n")) {
+    let e;
+    try { e = JSON.parse(raw); } catch { continue; }
+    if (e.isMeta || e.isSidechain || (e.type !== "user" && e.type !== "assistant")) continue;
+    const c = e.message?.content;
+    for (const b of typeof c === "string" ? [{ type: "text", text: c }] : Array.isArray(c) ? c : []) {
+      if (b.type === "text" && b.text?.trim() && !b.text.startsWith("<local-command-caveat>")) {
+        lines.push(`${e.type === "user" ? "USER" : "CLAUDE"}: ${b.text.trim()}`);
+      } else if (b.type === "tool_use") {
+        const i = b.input || {};
+        const target = i.file_path || i.notebook_path;
+        if (target && EDIT_TOOL_NAMES.test(b.name)) edited.add(target);
+        lines.push(`CLAUDE used ${b.name}: ${short(i.command || target || i.pattern || i.url || i.description || i.prompt || JSON.stringify(i), 200)}`);
+      } else if (b.type === "tool_result") {
+        const t = typeof b.content === "string" ? b.content : (b.content || []).map((x) => x.text || "").join(" ");
+        lines.push(`  -> ${b.is_error ? "ERROR: " : ""}${short(t, 300)}`);
+      }
+    }
+  }
+  let body = lines.join("\n");
+  if (body.length > TRANSFER_BUDGET) {
+    const head = 20_000;
+    body = `${body.slice(0, head)}\n\n[... middle of the session omitted ...]\n\n${body.slice(body.length - (TRANSFER_BUDGET - head))}`;
+  }
+  return { body, edited: [...edited], entries: lines.length };
+}
+
+async function cmdTransfer(o, cwd) {
+  const src = resolveTranscript(o.source || process.env.AGY_CLAUDE_TRANSCRIPT);
+  const t = condenseTranscript(fs.readFileSync(src, "utf8"));
+  if (!t.entries) throw new Error(`no conversation found in ${src}`);
+  const prompt = `${preamble(cwd, "read", o["add-dir"])}
+
+HANDOFF: you are taking over an in-progress Claude Code session in this workspace. Below is a condensed transcript (USER = the human, CLAUDE = the previous agent; tool outputs are truncated).
+Read it, inspect the workspace files as needed to confirm the current state, and make NO changes yet. Reply with:
+## Goal
+## Done so far
+## In progress / open problems
+## Files involved
+## Suggested next steps
+The user will continue this conversation with you afterwards.
+
+FILES CLAUDE EDITED: ${t.edited.length ? t.edited.join(", ") : "none"}
+${o.text ? `\nUSER NOTE FOR THE HANDOFF: ${o.text}\n` : ""}
+=== TRANSCRIPT (${path.basename(src)}) ===
+${t.body}`;
+  return launch(newJob("transfer", cwd, { ...o, text: o.text || `handoff of ${path.basename(src)}` }, "read", prompt, { source: src }), o);
+}
+
+// ---------- hooks ----------
+
+function shellQuote(v) {
+  return `'${String(v).replace(/'/g, `'\\''`)}'`;
+}
+
+// Exposes the transcript path so /agy:transfer can find the current session.
+function hookSessionStart(input) {
+  if (!process.env.CLAUDE_ENV_FILE) return;
+  const lines = [];
+  if (input.transcript_path) lines.push(`export AGY_CLAUDE_TRANSCRIPT=${shellQuote(input.transcript_path)}`);
+  if (input.session_id) lines.push(`export AGY_CLAUDE_SESSION_ID=${shellQuote(input.session_id)}`);
+  if (lines.length) fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `${lines.join("\n")}\n`);
+}
+
+const GATE_MAX_BLOCKS = 3;
+
+const GATE_PROMPT = `STOP-TIME REVIEW GATE. Claude Code is about to end its turn with the uncommitted changes below in the workspace. Decide whether they are safe to stop on.
+BLOCK only for concrete defects that must be fixed now: bugs, broken code or imports, security holes, data loss, clearly unfinished work (TODO stubs, half-applied edits). Do not block for style, naming, missing nice-to-haves, or speculative concerns. When in doubt, ALLOW.
+Open any workspace file you need to confirm a problem before blocking.
+
+OUTPUT CONTRACT: your first line must be exactly one of
+ALLOW: <short reason>
+BLOCK: <short reason>
+If BLOCK, follow with one bullet per defect: \`file:line\` — problem — fix.`;
+
+export function parseGate(text) {
+  const first = String(text || "").trim().split("\n", 1)[0].trim();
+  if (first.startsWith("ALLOW")) return { allow: true };
+  if (first.startsWith("BLOCK")) return { allow: false, reason: String(text).trim() };
+  return null;
+}
+
+async function hookStop(input) {
+  const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const running = listJobs(cwd).map(refresh).find((j) => j.status === "running");
+  if (running) console.error(`agy job ${running.id} is still running — /agy:status ${running.id}, /agy:cancel ${running.id}.`);
+
+  const cfg = loadConfig();
+  if (!cfg.reviewGate?.[cwd]) return;
+  if (!findAgy()) return console.error("agy review gate skipped: agy not found (run /agy:setup).");
+  let ctx;
+  try { ctx = collectReviewContext(cwd, { scope: "working-tree" }); } catch { return; } // not a git repo
+  if (ctx.empty) return;
+
+  // Review each distinct working-tree state once; stop re-blocking after GATE_MAX_BLOCKS rounds.
+  const key = input.session_id || cwd;
+  const hash = crypto.createHash("sha256").update(ctx.body).digest("hex");
+  const st = cfg.gateState?.[key] || { blocks: 0 };
+  if (st.hash === hash) return;
+  if (st.blocks >= GATE_MAX_BLOCKS) {
+    console.error(`agy review gate: blocked ${GATE_MAX_BLOCKS} times in a row; letting this stop through. Run /agy:review for a full pass.`);
+    return saveGateState(key, { hash, blocks: 0 });
+  }
+
+  const last = String(input.last_assistant_message || "").trim();
+  const prompt = `${preamble(cwd, "read", [])}\n\n${GATE_PROMPT}\n${last ? `\nCLAUDE'S FINAL MESSAGE FOR THIS TURN:\n${short(last, 4000)}\n` : ""}\nCHANGES: ${ctx.label}\n${ctx.stat ? `### STAT\n${ctx.stat}\n` : ""}### DIFF\n${ctx.body}`;
+  const job = await runJob(newJob("gate", cwd, { "add-dir": [], timeout: "840", text: "stop-time review gate" }, "read", prompt));
+  const verdict = job.status === "completed" && parseGate(job.result?.response);
+  if (!verdict) {
+    // Fail open: an agy outage or quota problem must not trap the Claude session.
+    return console.error(`agy review gate could not decide (job ${job.id}, ${job.status}); allowing stop. See /agy:result ${job.id}.`);
+  }
+  saveGateState(key, { hash, blocks: verdict.allow ? 0 : st.blocks + 1 });
+  if (!verdict.allow) {
+    process.stdout.write(`${JSON.stringify({ decision: "block", reason: `agy stop-time review found issues to fix before stopping (job ${job.id}):\n${verdict.reason}` })}\n`);
+  }
+}
+
+function saveGateState(key, state) {
+  const cfg = loadConfig();
+  cfg.gateState = { ...cfg.gateState, [key]: state };
+  saveConfig(cfg);
+}
+
+const COMMANDS = { task: cmdTask, review: cmdReview, research: cmdResearch, image: cmdImage, status: cmdStatus, result: cmdResult, cancel: cmdCancel, setup: cmdSetup, transfer: cmdTransfer, "resume-candidate": cmdResumeCandidate };
 
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
@@ -552,6 +717,13 @@ async function main() {
     if (!job) process.exit(1);
     job.pid = process.pid;
     await runJob(job);
+    return;
+  }
+  if (cmd === "hook-session-start" || cmd === "hook-stop") {
+    let input = {};
+    try { input = JSON.parse(fs.readFileSync(0, "utf8") || "{}"); } catch {}
+    try { await (cmd === "hook-stop" ? hookStop : hookSessionStart)(input); }
+    catch (e) { console.error(`agy hook: ${e.message}`); } // a broken hook must never trap the session
     return;
   }
   const fn = COMMANDS[cmd];

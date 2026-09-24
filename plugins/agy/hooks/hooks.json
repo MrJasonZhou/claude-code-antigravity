@@ -1,0 +1,11 @@
+{
+  "description": "agy plugin: exposes the Claude transcript path for /agy:transfer and runs the optional stop-time agy review gate.",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs\" hook-session-start", "timeout": 5 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs\" hook-stop", "timeout": 900 } ] }
+    ]
+  }
+}

@@ -22,7 +22,16 @@ Requirements: Node ≥ 18, and `agy` on `PATH` (or set `AGY_BIN`). You must have
 | `/agy:research <question>` | Answer from live Google Search, with source URLs. |
 | `/agy:image <description>` | Generate images. Files are saved to `agy-images/`, or to the directory given by `--out`. |
 | `/agy:status [id]`, `/agy:result [id]`, `/agy:cancel [id]` | Manage background jobs. |
-| `/agy:setup` | Check install and auth, and show quota and available models. |
+| `/agy:transfer [note]` | Hand the current Claude Code session to agy. agy reads a condensed transcript, checks the workspace, and replies with goal, progress, open problems and next steps. Continue with `agy --conversation <id>` in a terminal, or `/agy:task --resume-last` from Claude. |
+| `/agy:setup [--enable-review-gate\|--disable-review-gate]` | Check install and auth, show quota and models, and turn the stop-time review gate on or off for this workspace. |
+
+### Stop-time review gate
+
+This is off by default. Turn it on per workspace with `/agy:setup --enable-review-gate`. When Claude is about to stop and the working tree has uncommitted changes that agy has not reviewed yet, agy reviews them. If it finds a concrete defect, it blocks the stop and sends Claude back with the findings.
+
+- Each distinct working-tree state is reviewed only once. A stop with no changes, or with the same changes, costs nothing.
+- After 3 blocks in a row, the gate lets the stop through, so it cannot loop forever.
+- If agy fails (outage, quota, timeout), the stop goes through. A broken gate never traps the session.
 
 Claude can also call the **`agy-delegate`** subagent on its own. It does this for second opinions, whole-codebase questions, current web facts, or tasks that are well bounded.
 
