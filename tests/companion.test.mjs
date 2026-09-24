@@ -302,4 +302,10 @@ if (fs.existsSync(startedFile)) {
   assert.match(execFileSync("node", [COMPANION, "status", qid], { cwd: wrepo, env: qenv, encoding: "utf8" }), /— cancelled/);
 }
 
+// untracked names containing a newline are handled (NUL-separated listing)
+const nl = fs.mkdtempSync(path.join(os.tmpdir(), "agy-nl-"));
+execFileSync("git", ["init", "-q"], { cwd: nl });
+fs.writeFileSync(path.join(nl, "foo\nbar.js"), "content-x\n");
+assert.match(m.collectReviewContext(nl, { scope: "working-tree" }).body, /content-x/);
+
 console.log("ok");

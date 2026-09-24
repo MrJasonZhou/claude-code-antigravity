@@ -341,7 +341,7 @@ export function collectReviewContext(cwd, { base, scope = "auto", commit, pr }) 
   if (scope === "working-tree") {
     label = "uncommitted working-tree changes (staged + unstaged + untracked)";
     diff = git(cwd, ["diff", from, "--no-color"]);
-    const untracked = git(cwd, ["ls-files", "--others", "--exclude-standard"]).split("\n").filter(Boolean);
+    const untracked = git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
     for (const f of untracked) {
       let body;
       try {
