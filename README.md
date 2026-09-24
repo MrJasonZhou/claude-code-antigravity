@@ -1,3 +1,5 @@
+[English](README.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md)
+
 # agy for Claude Code
 
 A Claude Code plugin that hands work to **Google Antigravity CLI (`agy`)** and brings the results back, in the same way the Codex plugin does. agy runs Gemini (plus the Claude and GPT-OSS models it hosts) and has Google Search, image generation and a very large context window. That makes it a good second agent for Claude.
