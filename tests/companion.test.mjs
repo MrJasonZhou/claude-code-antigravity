@@ -322,4 +322,16 @@ if (fs.existsSync(`/proc/${process.pid}/stat`)) {
   assert.match(execFileSync("node", [COMPANION, "status", fakeId], { cwd: wrepo, env: wenv, encoding: "utf8" }), /— failed/);
 }
 
+// from a subdirectory: untracked files elsewhere in the repo are reviewed and fingerprinted, paths are root-relative
+const sub = path.join(wrepo, "backend");
+fs.mkdirSync(sub, { recursive: true });
+fs.writeFileSync(path.join(wrepo, "frontend-new.js"), "outside-subdir\n");
+const sctx = m.collectReviewContext(sub, { scope: "working-tree" });
+assert.match(sctx.body, /NEW FILE frontend-new\.js\noutside-subdir/);
+assert.equal(sctx.root, fs.realpathSync(wrepo));
+const sfp = m.worktreeFingerprint(sub);
+fs.writeFileSync(path.join(wrepo, "frontend-new.js"), "changed\n");
+assert.notEqual(m.worktreeFingerprint(sub), sfp);
+fs.rmSync(path.join(wrepo, "frontend-new.js"));
+
 console.log("ok");

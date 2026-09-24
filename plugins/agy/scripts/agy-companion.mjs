@@ -333,6 +333,7 @@ function diffBase(cwd) {
 // Content fingerprint of the whole uncommitted state (tracked diff + full untracked bytes), independent of
 // what gets truncated for the prompt, so the review gate notices a change anywhere.
 export function worktreeFingerprint(cwd) {
+  cwd = git(cwd, ["rev-parse", "--show-toplevel"]).trim(); // whole repo, not just the current subdirectory
   const h = crypto.createHash("sha256");
   h.update(spawnSync("git", ["diff", diffBase(cwd), "--binary"], { cwd, maxBuffer: 1024 * 1024 * 1024 }).stdout || "");
   for (const f of git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean)) {
@@ -356,12 +357,14 @@ function defaultBase(cwd) {
   return null;
 }
 
+// Everything is collected from the repository root: diff paths are root-relative, and untracked files
+// outside the current subdirectory must not be missed.
 export function collectReviewContext(cwd, { base, scope = "auto", commit, pr }) {
   if (pr) return prContext(cwd, pr);
-  git(cwd, ["rev-parse", "--is-inside-work-tree"]);
+  cwd = git(cwd, ["rev-parse", "--show-toplevel"]).trim();
   if (commit) {
     const body = git(cwd, ["show", "--no-color", "--format=commit %H%nAuthor: %an%nDate: %ad%n%n%B", commit]);
-    return finishContext({ label: `commit ${commit}`, scope: "commit", body, stat: git(cwd, ["show", "--stat", "--format=", commit]) });
+    return finishContext({ label: `commit ${commit}`, scope: "commit", body, stat: git(cwd, ["show", "--stat", "--format=", commit]), root: cwd });
   }
   const from = diffBase(cwd);
   const dirty = git(cwd, ["status", "--porcelain", "--untracked-files=all"]).trim();
@@ -396,7 +399,7 @@ export function collectReviewContext(cwd, { base, scope = "auto", commit, pr }) 
     throw new Error(`unknown --scope ${scope} (use auto|working-tree|branch)`);
   }
   const stat = git(cwd, scope === "branch" ? ["diff", "--stat", `${base}...HEAD`] : ["diff", "--stat", from]);
-  return finishContext({ label, scope, body: diff + extra, stat });
+  return finishContext({ label, scope, body: diff + extra, stat, root: cwd });
 }
 
 function finishContext(ctx) {
@@ -869,7 +872,7 @@ async function cmdImage(o, cwd) {
 async function cmdReview(o, cwd) {
   const ctx = collectReviewContext(cwd, { base: o.base, scope: o.scope, commit: o.commit, pr: o.pr });
   if (ctx.empty) return `Nothing to review: ${ctx.label} is empty.`;
-  const prompt = `${preamble(cwd, "read", o["add-dir"])}\n\n${reviewInstructions(o.adversarial, o.text)}\n\nCHANGE UNDER REVIEW: ${ctx.label}\n${ctx.stat ? `\n### STAT\n${ctx.stat}` : ""}\n### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
+  const prompt = `${preamble(cwd, "read", o["add-dir"])}\n\n${reviewInstructions(o.adversarial, o.text)}\n\nCHANGE UNDER REVIEW: ${ctx.label}${ctx.root ? ` (paths are relative to the repository root ${ctx.root})` : ""}\n${ctx.stat ? `\n### STAT\n${ctx.stat}` : ""}\n### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
   const job = newJob("review", cwd, { ...o, resume: null, "resume-last": false }, "read", prompt, { reviewLabel: ctx.label, truncated: ctx.truncated, adversarial: !!o.adversarial });
   job.agyArgs.push("--json-schema", REVIEW_SCHEMA);
   return launch(job, o);
@@ -1139,7 +1142,7 @@ async function hookStop(input) {
   }
 
   const last = String(input.last_assistant_message || "").trim();
-  const prompt = `${preamble(cwd, "read", [])}\n\n${GATE_PROMPT}\n${last ? `\nCLAUDE'S FINAL MESSAGE FOR THIS TURN:\n${short(last, 4000)}\n` : ""}\nCHANGES: ${ctx.label}\n${ctx.stat ? `### STAT\n${ctx.stat}\n` : ""}### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
+  const prompt = `${preamble(cwd, "read", [])}\n\n${GATE_PROMPT}\n${last ? `\nCLAUDE'S FINAL MESSAGE FOR THIS TURN:\n${short(last, 4000)}\n` : ""}\nCHANGES: ${ctx.label} (paths are relative to the repository root ${ctx.root})\n${ctx.stat ? `### STAT\n${ctx.stat}\n` : ""}### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
   const job = newJob("gate", cwd, { "add-dir": [], timeout: "840", text: "stop-time review gate" }, "read", prompt);
   job.pid = process.pid;
   await runJob(job);
