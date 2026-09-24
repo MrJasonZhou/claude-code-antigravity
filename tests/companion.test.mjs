@@ -419,12 +419,15 @@ assert.ok(Date.now() - tq < 4000); // did not wait for the grace period
 execFileSync("sleep", ["0.3"]);
 assert.throws(() => process.kill(Number(fs.readFileSync(quietPidFile, "utf8")), 0));
 
-// a lock left by a dead holder is taken over immediately; a lock we do not own is never removed by us
+// a lock left by a dead holder is reported at once (never auto-removed: check-then-delete is not atomic)
 const cfgFile = path.join(process.env.AGY_PLUGIN_DATA, "config.json");
 fs.writeFileSync(`${cfgFile}.lock`, "999999999 12345");
 const tl = Date.now();
-execFileSync("node", [COMPANION, "setup", "--disable-review-gate"], { cwd: wrepo, env: wenv, encoding: "utf8" });
+assert.match(execFileSync("node", [COMPANION, "setup", "--disable-review-gate"], { cwd: wrepo, env: wenv, encoding: "utf8" }), /left behind by a process that no longer exists/);
 assert.ok(Date.now() - tl < 8000);
-assert.equal(fs.existsSync(`${cfgFile}.lock`), false);
+assert.equal(fs.readFileSync(`${cfgFile}.lock`, "utf8"), "999999999 12345");
+fs.rmSync(`${cfgFile}.lock`);
+execFileSync("node", [COMPANION, "setup", "--disable-review-gate"], { cwd: wrepo, env: wenv, encoding: "utf8" });
+assert.equal(fs.existsSync(`${cfgFile}.lock`), false); // our own lock is released
 
 console.log("ok");

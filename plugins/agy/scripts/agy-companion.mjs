@@ -202,13 +202,12 @@ function writeJsonAtomic(file, data) {
 
 const readLock = (lock) => { try { return fs.readFileSync(lock, "utf8"); } catch { return null; } };
 
-// A lock is stale only if its holder is gone (pid + start time), or if it is an empty lock that outlived a
-// crash between create and write. Before removing it we re-read it, so a lock another process just took
-// over is never deleted by a second would-be stealer.
-function lockIsStale(lock, owner) {
-  if (owner === null) return false;
+// Whether the process recorded in a lock is gone. Locks are never removed automatically: without an OS-level
+// lock, "check the holder, then delete" cannot be made atomic, and two stealers could both win. A stale lock
+// only exists if a process died in the few milliseconds it holds one, so we report it instead.
+function lockHolderDead(owner) {
+  if (!owner) return false; // empty: being written right now (or a crash mid-create; the timeout reports it)
   const [pid, start] = owner.split(" ");
-  if (!pid) { try { return Date.now() - fs.statSync(lock).mtimeMs > 30_000; } catch { return false; } }
   return !sameProcess(Number(pid), start === "null" ? null : start);
 }
 
@@ -226,8 +225,8 @@ function updateJson(file, mutate) {
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       const owner = readLock(lock);
-      if (lockIsStale(lock, owner) && readLock(lock) === owner) { fs.rmSync(lock, { force: true }); continue; }
-      if (Date.now() > deadline) throw new Error(`timed out waiting for lock ${lock}`);
+      if (lockHolderDead(owner)) throw new Error(`${lock} was left behind by a process that no longer exists (${owner}); delete that file and retry`);
+      if (Date.now() > deadline) throw new Error(`timed out waiting for lock ${lock} (held by ${owner || "unknown"}); if no agy-companion is running, delete it and retry`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
     }
   }
