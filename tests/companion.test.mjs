@@ -255,6 +255,10 @@ fs.writeFileSync(path.join(wrepo, "b.txt"), "conflicting local content\n");
 const before = fs.readFileSync(path.join(wrepo, "b.txt"), "utf8");
 assert.match(execFileSync("node", [COMPANION, "apply", lid], { cwd: wrepo, env: lenv, encoding: "utf8" }), /nothing was changed/);
 assert.equal(fs.readFileSync(path.join(wrepo, "b.txt"), "utf8"), before);
+fs.writeFileSync(path.join(wrepo, ".git", "index.lock"), "");
+assert.match(execFileSync("node", [COMPANION, "apply", lid, "--force"], { cwd: wrepo, env: lenv, encoding: "utf8" }), /failed unexpectedly/);
+fs.rmSync(path.join(wrepo, ".git", "index.lock"));
+assert.doesNotMatch(execFileSync("node", [COMPANION, "status", lid, "--json"], { cwd: wrepo, env: lenv, encoding: "utf8" }), /"applied": true/);
 fs.rmSync(path.join(wrepo, "b.txt"));
 assert.equal(g("worktree", "list").trim().split("\n").length, 1); // trial worktree cleaned up
 
@@ -263,7 +267,7 @@ const slowAgy = path.join(tmp, "slow-agy");
 const childPidFile = path.join(tmp, "child.pid");
 fs.writeFileSync(slowAgy, `#!/bin/sh
 cat >/dev/null
-sleep 300 & echo $! > ${childPidFile}
+(trap '' TERM; exec sleep 300) & echo $! > ${childPidFile}
 wait
 `, { mode: 0o755 });
 const senv = { ...process.env, AGY_BIN: slowAgy };
@@ -276,5 +280,26 @@ const grandchild = Number(fs.readFileSync(childPidFile, "utf8"));
 assert.throws(() => process.kill(grandchild, 0)); // the test-runner-like grandchild is gone too
 assert.match(execFileSync("node", [COMPANION, "status", sid], { cwd: wrepo, env: senv, encoding: "utf8" }), /— cancelled/);
 assert.equal(g("worktree", "list").trim().split("\n").length, 1);
+
+// review context never dereferences untracked symlinks
+fs.symlinkSync(secret, path.join(wrepo, "creds"));
+const rctx = m.collectReviewContext(wrepo, { scope: "working-tree" });
+assert.match(rctx.body, /NEW SYMLINK creds -> /);
+assert.doesNotMatch(rctx.body, /TOP-SECRET/);
+fs.rmSync(path.join(wrepo, "creds"));
+
+// cancelling a job that is still queued: agy never starts and the cancelled state sticks
+const startedFile = path.join(tmp, "started");
+const markAgy = path.join(tmp, "mark-agy");
+fs.writeFileSync(markAgy, `#!/bin/sh\ntouch ${startedFile}\ncat >/dev/null\nsleep 30\n`, { mode: 0o755 });
+const qenv = { ...process.env, AGY_BIN: markAgy };
+const qid = /`(task-[^`]+)`/.exec(execFileSync("node", [COMPANION, "task", "--background", "q"], { cwd: wrepo, env: qenv, encoding: "utf8" }))[1];
+execFileSync("node", [COMPANION, "cancel", qid], { cwd: wrepo, env: qenv, encoding: "utf8" });
+execFileSync("sleep", ["1.5"]);
+assert.match(execFileSync("node", [COMPANION, "status", qid], { cwd: wrepo, env: qenv, encoding: "utf8" }), /— cancelled/);
+if (fs.existsSync(startedFile)) {
+  // the worker won the race and started agy; then it must have been stopped, not left running
+  assert.match(execFileSync("node", [COMPANION, "status", qid], { cwd: wrepo, env: qenv, encoding: "utf8" }), /— cancelled/);
+}
 
 console.log("ok");

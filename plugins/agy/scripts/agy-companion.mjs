@@ -344,7 +344,13 @@ export function collectReviewContext(cwd, { base, scope = "auto", commit, pr }) 
     const untracked = git(cwd, ["ls-files", "--others", "--exclude-standard"]).split("\n").filter(Boolean);
     for (const f of untracked) {
       let body;
-      try { body = fs.readFileSync(path.join(cwd, f)); } catch { continue; }
+      try {
+        // Never follow symlinks: a link to ~/.aws/credentials must not put the target's content into the prompt.
+        const st = fs.lstatSync(path.join(cwd, f));
+        if (st.isSymbolicLink()) { extra += `\n### NEW SYMLINK ${f} -> ${fs.readlinkSync(path.join(cwd, f))}\n`; continue; }
+        if (!st.isFile()) continue;
+        body = fs.readFileSync(path.join(cwd, f));
+      } catch { continue; }
       extra += body.includes(0) || body.length > 100_000
         ? `\n### NEW FILE ${f} (binary or large, ${body.length} bytes; open it if relevant)\n`
         : `\n### NEW FILE ${f}\n${body.toString("utf8")}\n`;
@@ -388,6 +394,10 @@ function prContext(cwd, pr) {
 // started. Groups owned by this process are killed if we are terminated or exit.
 const activeGroups = new Set();
 let signalsHooked = false;
+
+function groupAlive(pgid) {
+  try { process.kill(-pgid, 0); return true; } catch { return false; }
+}
 
 function signalGroup(pid, sig) {
   try { process.kill(-pid, sig); return true; } catch { try { process.kill(pid, sig); return true; } catch { return false; } }
@@ -728,7 +738,9 @@ function cmdApply(o, cwd) {
     }
     const r = apply(root, ["--3way"]);
     how = conflicts ? "with conflict markers (resolve them; see `git status`)" : "with a 3-way merge";
-    if (r.status !== 0 && !conflicts) return `git apply --3way failed unexpectedly; check \`git status\`:\n\`\`\`\n${r.stderr.trim()}\n\`\`\``;
+    // A non-zero exit is only acceptable if it actually left merge conflicts behind (not a lock or permission error).
+    const unmerged = git(root, ["ls-files", "-u"]).trim();
+    if (r.status !== 0 && (!conflicts || !unmerged)) return `git apply --3way failed unexpectedly; check \`git status\`:\n\`\`\`\n${r.stderr.trim()}\n\`\`\``;
   }
   job.applied = true;
   saveJob(job);
@@ -806,7 +818,7 @@ function pruneJobs() {
   const jobs = names.map((f) => loadJob(f.slice(0, -5))).filter((j) => j && j.status !== "running")
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   for (const j of jobs.slice(0, names.length - MAX_JOBS)) {
-    for (const ext of [".json", ".log", ".patch"]) fs.rmSync(path.join(JOBS_DIR, `${j.id}${ext}`), { force: true });
+    for (const ext of [".json", ".log", ".patch", ".cancel"]) fs.rmSync(path.join(JOBS_DIR, `${j.id}${ext}`), { force: true });
   }
 }
 
@@ -893,10 +905,17 @@ async function cmdCancel(o, cwd) {
   const job = o.text ? findJob(o.text, cwd, o.all) : listJobs(cwd).map(refresh).find((j) => j.status === "running" || j.status === "queued");
   if (!job) return o.text ? `No job ${o.text} in this workspace.` : "No running agy job in this workspace.";
   if (job.status !== "running" && job.status !== "queued") return `Job \`${job.id}\` is already ${job.status}.`;
-  fs.writeFileSync(cancelFile(job.id), "");
+  fs.writeFileSync(cancelFile(job.id), ""); // the owner checks this before starting agy and when agy exits
+  // A queued background job may not have a worker pid yet: give the worker time to claim it and see the marker.
+  const ownerGone = (j) => (j.pid ? !isAlive(j.pid) : Date.now() - Date.parse(j.createdAt) > 60_000);
+  await waitUntil(() => { const j = loadJob(job.id); return !j || j.status !== "queued" || ownerGone(j); }, 10_000);
   const agyPid = loadJob(job.id)?.agyPid;
-  if (agyPid && signalGroup(agyPid, "SIGTERM") && !(await waitUntil(() => !isAlive(agyPid), 5000))) signalGroup(agyPid, "SIGKILL");
-  const finished = () => { const j = loadJob(job.id); return !j || j.status !== "running" || !j.pid || !isAlive(j.pid); };
+  if (agyPid && groupAlive(agyPid)) {
+    signalGroup(agyPid, "SIGTERM");
+    // Judge by the whole group, not the leader: a child that ignores TERM must still be killed.
+    if (!(await waitUntil(() => !groupAlive(agyPid), 5000))) signalGroup(agyPid, "SIGKILL");
+  }
+  const finished = () => { const j = loadJob(job.id); return !j || !["running", "queued"].includes(j.status) || ownerGone(j); };
   await waitUntil(finished, 10_000);
   const cur = loadJob(job.id);
   if (cur && (cur.status === "running" || cur.status === "queued")) {
@@ -904,9 +923,8 @@ async function cmdCancel(o, cwd) {
     Object.assign(cur, { status: "cancelled", finishedAt: new Date().toISOString() });
     if (cur.worktree) removeWorktree(cur.repoRoot, cur.worktree);
     cur.rendered = render(cur);
-    saveJob(cur);
+    saveJob(cur); // the marker stays, so a worker that shows up late still refuses to run
   }
-  fs.rmSync(cancelFile(job.id), { force: true });
   return `Cancelled \`${job.id}\`.`;
 }
 
@@ -1115,7 +1133,7 @@ async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   if (cmd === "_worker") {
     const job = loadJob(rest[0]);
-    if (!job) process.exit(1);
+    if (!job || job.status !== "queued") process.exit(1); // only claim a job nobody else has finalized
     job.pid = process.pid;
     await runJob(job);
     return;
