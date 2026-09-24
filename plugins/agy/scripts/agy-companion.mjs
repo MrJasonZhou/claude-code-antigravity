@@ -237,7 +237,7 @@ export function allowedCommands(settings = readAgySettings()) {
 // managers when bare, with an inline-code flag anywhere, or ending in an option or launcher subcommand
 // ("python3 -m", "npm exec", "uv run") whose next token would be free.
 const NEVER = /^(\*|sh|bash|zsh|fish|dash|ksh|csh|tcsh|pwsh|powershell|cmd|busybox|toybox|env|sudo|su|doas|nohup|timeout|nice|ionice|chrt|taskset|time|stdbuf|setsid|script|watch|chroot|unshare|flock|strace|ltrace|gdb|parallel|expect|osascript|eval|exec|source|xargs|find|rm|dd|curl|wget|nc|ncat|ssh|scp|uvx)$/;
-const OPEN_ENDED_TOOL = /^(python[0-9.]*|node|deno|bun|perl|ruby|php|lua|npx|pnpx|bunx|npm|pnpm|yarn|uv|pipx|poetry|pdm|hatch|cargo|go|dotnet|gradle|mvn|git|docker|podman|kubectl|make|awk|gawk|sed)$/;
+const OPEN_ENDED_TOOL = /^(python[0-9.]*|node|deno|bun|perl|ruby|php|lua|npx|pnpx|bunx|npm|pnpm|yarn|uv|pipx|poetry|pdm|hatch|cargo|go|dotnet|gradle|mvn|git|docker|podman|kubectl|make|awk|gawk|sed|bundle|pipenv|composer|rake)$/;
 const INLINE_CODE = /^(-c|-e|-E|-p|-r|-x|--eval|--print|eval)$/;
 const LAUNCHER_SUB = /^(exec|x|dlx|run|task|tool|tools|create)$/;
 // Any option without "=" may take the next token as its value (npm --prefix frontend, npm --loglevel error),
@@ -267,7 +267,9 @@ export function validateAllowCommand(cmd) {
   const endsOnOptionValue = prev.startsWith("-") && !prev.includes("=") && !SELECTS(prev);
   const openEnded = !positionals(args).length || endsOnOptionValue || args.some((t) => INLINE_CODE.test(t))
     || last.startsWith("-") || LAUNCHER_SUB.test(last);
-  if (NEVER.test(tool) || (OPEN_ENDED_TOOL.test(tool) && openEnded)) {
+  // Ending on a launcher subcommand ("bundle exec", "pipenv run", "composer exec") is open-ended for ANY tool,
+  // listed or not, so the guard does not depend on knowing every package manager.
+  if (NEVER.test(tool) || LAUNCHER_SUB.test(last) || (OPEN_ENDED_TOOL.test(tool) && openEnded)) {
     throw new Error(`"${c}" would let agy run arbitrary commands; allow a specific command that ends in a subcommand, such as "npm test", "npm --prefix web test", "pytest" or "python3 -m unittest" (drop trailing flags: agy may append arguments itself)`);
   }
   return c;
