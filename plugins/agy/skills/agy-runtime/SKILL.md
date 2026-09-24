@@ -25,6 +25,9 @@ Flags shared by task, review, research, image:
 - Policy: default read-only · `--write` file edits (agy `--mode accept-edits`) · `--worktree` file edits in an isolated git worktree, returned as a patch · `--yolo` shell + URLs (agy `--dangerously-skip-permissions`, explicit user opt-in only).
 - Commands allowlisted via `setup --allow-command "<cmd>"` (stored in agy's settings.json) can run in every policy; agy is told exactly which ones, so it can run tests and iterate.
 - `--background` detaches and returns a job id. `--model <id|pro|flash|opus|sonnet|gpt>` (aliases resolve to the newest matching model). `--effort low|medium|high`. `--add-dir <dir>` (repeatable). `--timeout <seconds>`. `--agent <name>` selects a custom agy agent. `--json` prints the raw job record.
+- `--models a,b` on `task --worktree`: best-of-N, one independent attempt and patch per model.
+- `--prompt-file <path>` appends a file's contents to the prompt; use it for large logs or specs (argv entries are capped at 128 KB).
+- `result <id> --wait [--timeout <s>]` blocks until a detached job finishes.
 - `--resume-last` continues the last agy conversation in this workspace; `--resume <conversation-id>` continues a specific one.
 
 Why the policies matter: agy's headless mode cannot ask for permission, so a tool outside the policy aborts the run. The output then contains a "stopped because it tried a tool…" note; suggest re-running with `--write` or `--yolo` instead of working around it.

@@ -1,6 +1,6 @@
 ---
 description: Show the stored output of a finished agy job (latest one by default)
-argument-hint: "[job-id]"
+argument-hint: "[job-id] [--wait]"
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---
