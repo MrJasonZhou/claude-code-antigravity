@@ -239,7 +239,7 @@ export function allowedCommands(settings = readAgySettings()) {
 const NEVER = /^(\*|sh|bash|zsh|fish|dash|ksh|csh|tcsh|pwsh|powershell|cmd|busybox|toybox|env|sudo|su|doas|nohup|timeout|nice|ionice|chrt|taskset|time|stdbuf|setsid|script|watch|chroot|unshare|flock|strace|ltrace|gdb|parallel|expect|osascript|eval|exec|source|xargs|find|rm|dd|curl|wget|nc|ncat|ssh|scp|uvx)$/;
 const OPEN_ENDED_TOOL = /^(python[0-9.]*|node|deno|bun|perl|ruby|php|lua|npx|pnpx|bunx|npm|pnpm|yarn|uv|pipx|poetry|pdm|hatch|cargo|go|dotnet|gradle|mvn|git|docker|podman|kubectl|make|awk|gawk|sed|bundle|pipenv|composer|rake)$/;
 const INLINE_CODE = /^(-c|-e|-E|-p|-r|-x|--eval|--print|eval)$/;
-const LAUNCHER_SUB = /^(exec|x|dlx|run|task|tool|tools|create)$/;
+const LAUNCHER_SUB = /^(exec|x|dlx|run|task|tool|tools|create|init|innit)$/;
 // Any option without "=" may take the next token as its value (npm --prefix frontend, npm --loglevel error),
 // so that token is never counted as a subcommand. Structural on purpose: no list of value-taking options to keep up.
 // Exception: "-m <module>" (python3 -m unittest) names exactly what runs, so the module is the subcommand.
