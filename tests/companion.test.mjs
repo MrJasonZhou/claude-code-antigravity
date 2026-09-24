@@ -124,10 +124,10 @@ fs.rmSync(path.join(repo, "big.bin"));
 
 // allowlist validation
 assert.equal(m.validateAllowCommand("  npm   test "), "npm test");
-for (const bad of ["python3", "bash -c", "sh", "python3 -c", "node -e", "perl -E", "find . -name x", "env FOO=1", "sudo npm test", "/bin/bash -c", "npx", "git", "curl example.com", "deno eval", "python -u -c", "python3 -m", "node --require", "perl -w -e"]) {
+for (const bad of ["python3", "bash -c", "sh", "python3 -c", "node -e", "perl -E", "find . -name x", "env FOO=1", "sudo npm test", "/bin/bash -c", "npx", "git", "curl example.com", "deno eval", "python -u -c", "python3 -m", "node --require", "perl -w -e", "/bin/busybox sh", "npm", "npm exec", "npm run", "pnpm dlx", "yarn dlx", "uv run", "uvx ruff", "pipx run", "bun x"]) {
   assert.throws(() => m.validateAllowCommand(bad), /arbitrary commands|metacharacters/, bad);
 }
-for (const ok of ["npm test", "pytest", "python3 -m unittest", "cargo test", "go test", "npx jest", "git status"]) assert.equal(m.validateAllowCommand(ok), ok);
+for (const ok of ["npm test", "npm run test", "pytest", "python3 -m unittest", "cargo test", "go test ./...", "npx jest", "git status", "uv run pytest"]) assert.equal(m.validateAllowCommand(ok), ok);
 assert.throws(() => m.validateAllowCommand("npm test && rm -rf /"), /metacharacters/);
 assert.deepEqual(m.allowedCommands({ permissions: { allow: ["command(npm test)", "read_file(/x)", "command(*)"] } }), ["npm test"]);
 
@@ -333,5 +333,12 @@ const sfp = m.worktreeFingerprint(sub);
 fs.writeFileSync(path.join(wrepo, "frontend-new.js"), "changed\n");
 assert.notEqual(m.worktreeFingerprint(sub), sfp);
 fs.rmSync(path.join(wrepo, "frontend-new.js"));
+// review from a subdirectory runs agy at the repository root
+const pwdFile = path.join(tmp, "pwd.txt");
+fs.writeFileSync(path.join(tmp, "pwd-agy"), `#!/bin/sh\ncat >/dev/null\npwd > ${pwdFile}\n`, { mode: 0o755 });
+fs.writeFileSync(path.join(wrepo, "x.txt"), "x\n");
+execFileSync("node", [COMPANION, "review", "--scope", "working-tree"], { cwd: sub, env: { ...process.env, AGY_BIN: path.join(tmp, "pwd-agy") } });
+assert.equal(fs.readFileSync(pwdFile, "utf8").trim(), fs.realpathSync(wrepo));
+fs.rmSync(path.join(wrepo, "x.txt"));
 
 console.log("ok");

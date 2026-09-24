@@ -231,11 +231,15 @@ export function allowedCommands(settings = readAgySettings()) {
   return (settings.permissions?.allow || []).map((r) => /^command\((.+)\)$/.exec(r)?.[1]).filter((c) => c && c !== "*");
 }
 
-// Rules are prefixes, so "bash -c" would allow `bash -c "<anything>"`. Refuse anything that can run arbitrary code:
-// shells/launchers/destructive or network tools in any form, and interpreters bare or with an inline-code flag.
-const NEVER = /^(\*|sh|bash|zsh|fish|dash|ksh|csh|tcsh|pwsh|powershell|cmd|env|sudo|su|doas|nohup|timeout|nice|time|eval|exec|source|xargs|find|rm|dd|curl|wget|nc|ncat|ssh|scp)$/;
-const BARE_ONLY = /^(python[0-9.]*|node|deno|bun|perl|ruby|php|lua|npx|pnpx|bunx|git|docker|podman|kubectl|make|awk|gawk|sed)$/;
-const INLINE_CODE = /^(-c|-e|-E|-p|-r|-x|--eval|--print|eval|run|exec)$/;
+// Rules are prefixes, so "bash -c" would allow `bash -c "<anything>"`. This check guards against rules that are
+// open-ended by construction; it is not a sandbox (a test command runs project code that agy may have edited).
+// Refused: shells, wrappers/launchers and destructive or network tools in any form; interpreters and package
+// managers when bare, with an inline-code flag anywhere, or ending in an option or launcher subcommand
+// ("python3 -m", "npm exec", "uv run") whose next token would be free.
+const NEVER = /^(\*|sh|bash|zsh|fish|dash|ksh|csh|tcsh|pwsh|powershell|cmd|busybox|toybox|env|sudo|su|doas|nohup|timeout|nice|ionice|chrt|taskset|time|stdbuf|setsid|script|watch|chroot|unshare|flock|strace|ltrace|gdb|parallel|expect|osascript|eval|exec|source|xargs|find|rm|dd|curl|wget|nc|ncat|ssh|scp|uvx)$/;
+const OPEN_ENDED_TOOL = /^(python[0-9.]*|node|deno|bun|perl|ruby|php|lua|npx|pnpx|bunx|npm|pnpm|yarn|uv|pipx|poetry|pdm|hatch|cargo|go|dotnet|gradle|mvn|git|docker|podman|kubectl|make|awk|gawk|sed)$/;
+const INLINE_CODE = /^(-c|-e|-E|-p|-r|-x|--eval|--print|eval)$/;
+const LAUNCHER_SUB = /^(exec|x|dlx|run|tool|tools|create)$/;
 
 export function validateAllowCommand(cmd) {
   const c = String(cmd || "").trim().replace(/\s+/g, " ");
@@ -245,8 +249,9 @@ export function validateAllowCommand(cmd) {
   const tool = path.basename(first);
   // For interpreters, any inline-code flag (python -u -c) or a trailing option whose value would be free
   // (python3 -m, node --require) makes the prefix open-ended.
-  const openEnded = !args.length || args.some((t) => INLINE_CODE.test(t)) || args[args.length - 1].startsWith("-");
-  if (NEVER.test(tool) || (BARE_ONLY.test(tool) && openEnded)) {
+  const last = args[args.length - 1] || "";
+  const openEnded = !args.length || args.some((t) => INLINE_CODE.test(t)) || last.startsWith("-") || LAUNCHER_SUB.test(last);
+  if (NEVER.test(tool) || (OPEN_ENDED_TOOL.test(tool) && openEnded)) {
     throw new Error(`"${c}" would let agy run arbitrary commands; allow a specific command such as "npm test", "pytest" or "python3 -m unittest"`);
   }
   return c;
@@ -872,8 +877,9 @@ async function cmdImage(o, cwd) {
 async function cmdReview(o, cwd) {
   const ctx = collectReviewContext(cwd, { base: o.base, scope: o.scope, commit: o.commit, pr: o.pr });
   if (ctx.empty) return `Nothing to review: ${ctx.label} is empty.`;
-  const prompt = `${preamble(cwd, "read", o["add-dir"])}\n\n${reviewInstructions(o.adversarial, o.text)}\n\nCHANGE UNDER REVIEW: ${ctx.label}${ctx.root ? ` (paths are relative to the repository root ${ctx.root})` : ""}\n${ctx.stat ? `\n### STAT\n${ctx.stat}` : ""}\n### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
-  const job = newJob("review", cwd, { ...o, resume: null, "resume-last": false }, "read", prompt, { reviewLabel: ctx.label, truncated: ctx.truncated, adversarial: !!o.adversarial });
+  const root = ctx.root || cwd; // diff paths are repo-relative, so agy works from the repository root
+  const prompt = `${preamble(root, "read", o["add-dir"])}\n\n${reviewInstructions(o.adversarial, o.text)}\n\nCHANGE UNDER REVIEW: ${ctx.label}${ctx.root ? ` (paths are relative to the repository root ${ctx.root})` : ""}\n${ctx.stat ? `\n### STAT\n${ctx.stat}` : ""}\n### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
+  const job = newJob("review", cwd, { ...o, resume: null, "resume-last": false }, "read", prompt, { reviewLabel: ctx.label, truncated: ctx.truncated, adversarial: !!o.adversarial, runCwd: root });
   job.agyArgs.push("--json-schema", REVIEW_SCHEMA);
   return launch(job, o);
 }
@@ -1142,8 +1148,8 @@ async function hookStop(input) {
   }
 
   const last = String(input.last_assistant_message || "").trim();
-  const prompt = `${preamble(cwd, "read", [])}\n\n${GATE_PROMPT}\n${last ? `\nCLAUDE'S FINAL MESSAGE FOR THIS TURN:\n${short(last, 4000)}\n` : ""}\nCHANGES: ${ctx.label} (paths are relative to the repository root ${ctx.root})\n${ctx.stat ? `### STAT\n${ctx.stat}\n` : ""}### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
-  const job = newJob("gate", cwd, { "add-dir": [], timeout: "840", text: "stop-time review gate" }, "read", prompt);
+  const prompt = `${preamble(ctx.root, "read", [])}\n\n${GATE_PROMPT}\n${last ? `\nCLAUDE'S FINAL MESSAGE FOR THIS TURN:\n${short(last, 4000)}\n` : ""}\nCHANGES: ${ctx.label} (paths are relative to the repository root ${ctx.root})\n${ctx.stat ? `### STAT\n${ctx.stat}\n` : ""}### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
+  const job = newJob("gate", cwd, { "add-dir": [], timeout: "840", text: "stop-time review gate" }, "read", prompt, { runCwd: ctx.root });
   job.pid = process.pid;
   await runJob(job);
   const verdict = job.status === "completed" && parseGate(job.result?.response);

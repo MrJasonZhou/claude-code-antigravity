@@ -10,4 +10,4 @@ Present the output. If agy is not found, tell the user to install the Google Ant
 
 When the review gate is enabled: every time Claude is about to stop in this workspace with uncommitted changes, agy reviews any state it has not seen yet and can send Claude back to fix concrete defects. A state agy blocked stays blocked (without another agy call) until the code changes; after 3 consecutive blocks the gate lets the stop through, and it also lets it through if agy fails. It uses agy quota and adds latency to stops with new changes.
 
-`--allow-command` adds a rule to agy's own global settings.json: it applies to every agy session on this machine, including interactive ones. Broad rules (`python3`, `bash`, `git`, …) and shell metacharacters are refused.
+`--allow-command` adds a rule to agy's own global settings.json: it applies to every agy session on this machine, including interactive ones. Open-ended rules (`bash -c`, `python3 -c`, `npm exec`, `uv run`, …) and shell metacharacters are refused. This guards against accidentally broad rules; it is not a sandbox — an allowed test command runs project code, which agy can edit in `--write` mode.
