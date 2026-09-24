@@ -124,7 +124,7 @@ fs.rmSync(path.join(repo, "big.bin"));
 
 // allowlist validation
 assert.equal(m.validateAllowCommand("  npm   test "), "npm test");
-for (const bad of ["python3", "bash -c", "sh", "python3 -c", "node -e", "perl -E", "find . -name x", "env FOO=1", "sudo npm test", "/bin/bash -c", "npx", "git", "curl example.com", "deno eval"]) {
+for (const bad of ["python3", "bash -c", "sh", "python3 -c", "node -e", "perl -E", "find . -name x", "env FOO=1", "sudo npm test", "/bin/bash -c", "npx", "git", "curl example.com", "deno eval", "python -u -c", "python3 -m", "node --require", "perl -w -e"]) {
   assert.throws(() => m.validateAllowCommand(bad), /arbitrary commands|metacharacters/, bad);
 }
 for (const ok of ["npm test", "pytest", "python3 -m unittest", "cargo test", "go test", "npx jest", "git status"]) assert.equal(m.validateAllowCommand(ok), ok);

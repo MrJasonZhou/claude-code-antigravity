@@ -112,6 +112,7 @@ const logFile = (id) => path.join(JOBS_DIR, `${id}.log`);
 const cancelFile = (id) => path.join(JOBS_DIR, `${id}.cancel`);
 
 function saveJob(job) {
+  if (job.pid === process.pid && !job.pidStart) job.pidStart = procStart(process.pid); // identity travels with the pid
   fs.mkdirSync(JOBS_DIR, { recursive: true });
   const tmp = `${jobFile(job.id)}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(job, null, 2));
@@ -143,10 +144,15 @@ function procStart(pid) {
   try { return fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop().split(" ")[19]; } catch { return null; }
 }
 
+const HAS_PROCFS = fs.existsSync("/proc/self/stat");
+
+// With /proc we fail closed: an unknown or different start time means "not our process".
+// Without it (macOS, BSD) liveness is the only signal available.
 function sameProcess(pid, start) {
   if (!pid || !isAlive(pid)) return false;
+  if (!HAS_PROCFS) return true;
   const now = procStart(pid);
-  return !start || !now || now === start;
+  return Boolean(start && now && start === now);
 }
 
 // A job whose owner process died without writing a result is failed, not "running" forever.
@@ -235,9 +241,12 @@ export function validateAllowCommand(cmd) {
   const c = String(cmd || "").trim().replace(/\s+/g, " ");
   if (!c) throw new Error("empty command");
   if (/[;&|`$<>(){}\\\n'"]/.test(c)) throw new Error(`"${c}": shell metacharacters and quotes are not allowed in an allow rule`);
-  const [first, second] = c.split(" ");
+  const [first, ...args] = c.split(" ");
   const tool = path.basename(first);
-  if (NEVER.test(tool) || (BARE_ONLY.test(tool) && (!second || INLINE_CODE.test(second)))) {
+  // For interpreters, any inline-code flag (python -u -c) or a trailing option whose value would be free
+  // (python3 -m, node --require) makes the prefix open-ended.
+  const openEnded = !args.length || args.some((t) => INLINE_CODE.test(t)) || args[args.length - 1].startsWith("-");
+  if (NEVER.test(tool) || (BARE_ONLY.test(tool) && openEnded)) {
     throw new Error(`"${c}" would let agy run arbitrary commands; allow a specific command such as "npm test", "pytest" or "python3 -m unittest"`);
   }
   return c;
@@ -494,7 +503,6 @@ export function runJob(job) {
     const child = spawn(bin, job.agyArgs, { cwd: job.runCwd || job.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" }, detached: true });
     if (child.pid) trackGroup(child.pid);
     Object.assign(job, { status: "running", agyPid: child.pid, agyStart: procStart(child.pid), startedAt: new Date().toISOString() });
-    if (job.pid === process.pid) job.pidStart = procStart(process.pid);
     saveJob(job);
     // agy may exit before reading the prompt (bad flag, auth failure); that must fail the job, not crash us.
     child.stdin.on("error", () => {});
