@@ -574,7 +574,7 @@ function resolveTranscript(src) {
   const p = src.startsWith("~/") ? path.join(os.homedir(), src.slice(2)) : path.resolve(src);
   if (path.extname(p) !== ".jsonl") throw new Error(`Claude transcript must be a .jsonl file: ${p}`);
   let real;
-  try { real = fs.realpathSync(p); } catch { throw new Error(`Claude transcript not found: ${p}`); }
+  try { real = fs.realpathSync(p); } catch { throw new Error(`Claude transcript not found: ${p} — if this is the first message of the session there is nothing to hand over yet`); }
   const rel = path.relative(fs.realpathSync(CLAUDE_PROJECTS), real);
   if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`only transcripts under ${CLAUDE_PROJECTS} can be transferred: ${real}`);
   return real;
@@ -736,11 +736,9 @@ async function main() {
   try {
     const out = await fn(parseArgs(tokens), process.cwd());
     process.stdout.write(`${out}\n`);
-    const job = typeof out === "string" && /^# agy \w+ — failed/.test(out);
-    process.exitCode = job ? 1 : 0;
   } catch (e) {
-    console.error(`agy-companion: ${e.message}`);
-    process.exitCode = 1;
+    // stdout + exit 0 on purpose: Claude Code drops the output of inline `!` commands that exit non-zero.
+    process.stdout.write(`agy-companion error: ${e.message}\n`);
   }
 }
 
