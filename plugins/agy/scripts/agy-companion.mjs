@@ -25,6 +25,8 @@ const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
 
 // ---------- args ----------
 
+// Deliberately not full POSIX: a quote only opens at the start of a token and only if it is closed later,
+// so natural-language apostrophes ("don't", "it's") survive; shell-style concatenation ("a"b) is not supported.
 export function tokenize(str) {
   const out = [];
   let cur = "", quote = null, has = false;
@@ -43,7 +45,7 @@ export function tokenize(str) {
   return out;
 }
 
-const BOOL = new Set(["write", "yolo", "background", "wait", "json", "resume-last", "fresh", "adversarial", "all", "keep", "enable-review-gate", "disable-review-gate", "worktree"]);
+const BOOL = new Set(["write", "yolo", "background", "wait", "json", "resume-last", "fresh", "adversarial", "all", "keep", "enable-review-gate", "disable-review-gate", "worktree", "force"]);
 const VALUE = new Set(["model", "effort", "resume", "add-dir", "timeout", "base", "scope", "out", "agent", "source", "commit", "pr", "models", "allow-command", "revoke-command", "prompt-file"]);
 
 export function parseArgs(tokens) {
@@ -55,7 +57,8 @@ export function parseArgs(tokens) {
     if (m && BOOL.has(m[1])) { opts[m[1]] = true; continue; }
     if (m && VALUE.has(m[1])) {
       const v = m[2] ?? tokens[++i];
-      if (v === undefined) throw new Error(`--${m[1]} needs a value`);
+      const flag = /^--([a-z-]+)/.exec(v ?? "")?.[1];
+      if (v === undefined || (m[2] === undefined && (BOOL.has(flag) || VALUE.has(flag)))) throw new Error(`--${m[1]} needs a value`);
       if (m[1] === "add-dir") opts["add-dir"].push(v); else opts[m[1]] = v;
       continue;
     }
@@ -101,8 +104,12 @@ export function resolveModel(value, models) {
 
 // ---------- jobs ----------
 
+// Job ids are validated before touching the filesystem: a crafted "../x" must never select a foreign JSON
+// whose pid/patch/worktree fields would then be trusted by cancel/apply.
+export const JOB_ID = /^(task|review|research|image|transfer|gate)-[a-z0-9]+-[0-9a-f]{4}$/;
 const jobFile = (id) => path.join(JOBS_DIR, `${id}.json`);
 const logFile = (id) => path.join(JOBS_DIR, `${id}.log`);
+const cancelFile = (id) => path.join(JOBS_DIR, `${id}.cancel`);
 
 function saveJob(job) {
   fs.mkdirSync(JOBS_DIR, { recursive: true });
@@ -112,7 +119,11 @@ function saveJob(job) {
 }
 
 function loadJob(id) {
-  try { return JSON.parse(fs.readFileSync(jobFile(id), "utf8")); } catch { return null; }
+  if (!JOB_ID.test(String(id))) return null;
+  try {
+    const j = JSON.parse(fs.readFileSync(jobFile(id), "utf8"));
+    return j && j.id === id && typeof j.cwd === "string" ? j : null;
+  } catch { return null; }
 }
 
 function listJobs(cwd, all) {
@@ -126,9 +137,11 @@ function isAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-// A job whose worker died without writing a result is failed, not "running" forever.
+// A job whose owner process died without writing a result is failed, not "running" forever.
+// (A background job gets its pid from the worker itself; give it a minute to show up.)
 function refresh(job) {
-  if (job.status === "running" && job.pid && !isAlive(job.pid)) {
+  const ownerGone = job.pid ? !isAlive(job.pid) : Date.now() - Date.parse(job.createdAt) > 60_000;
+  if ((job.status === "running" || job.status === "queued") && ownerGone) {
     job.status = "failed";
     job.error = job.error || "worker process exited unexpectedly";
     saveJob(job);
@@ -136,12 +149,12 @@ function refresh(job) {
   return job;
 }
 
-function findJob(ref, cwd) {
-  if (ref) {
-    const j = loadJob(ref) || listJobs(cwd, true).find((x) => x.id.startsWith(ref));
-    return j && refresh(j);
-  }
-  return null;
+// Exact ids or unique prefixes, limited to this workspace unless --all.
+function findJob(ref, cwd, all = false) {
+  if (!ref) return null;
+  const exact = loadJob(ref);
+  const j = exact && (all || exact.cwd === cwd) ? exact : listJobs(cwd, all).find((x) => x.id.startsWith(ref));
+  return j ? refresh(j) : null;
 }
 
 // ---------- prompts ----------
@@ -152,10 +165,48 @@ const POLICY = {
   yolo: "TOOL POLICY: full access, including shell commands and URL fetching. Stay inside the workspace. Never run destructive commands (rm -rf, git reset --hard, git push --force, dropping data) and do not commit or push.",
 };
 
+// ---------- safe JSON files (atomic write + cross-process lock) ----------
+
+// Missing file -> {}. Corrupt file -> throw: overwriting it would silently wipe the user's settings.
+function readJson(file) {
+  let text;
+  try { text = fs.readFileSync(file, "utf8"); } catch (e) { if (e.code === "ENOENT") return {}; throw e; }
+  try { return JSON.parse(text); } catch { throw new Error(`${file} is not valid JSON; fix or remove it first (not overwriting it)`); }
+}
+
+function writeJsonAtomic(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(3).toString("hex")}.tmp`;
+  const fd = fs.openSync(tmp, "w");
+  try { fs.writeSync(fd, `${JSON.stringify(data, null, 2)}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.renameSync(tmp, file);
+}
+
+// Read-modify-write under an O_EXCL lock file; a lock older than 30s is treated as stale.
+function updateJson(file, mutate) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try { fs.closeSync(fs.openSync(lock, "wx")); break; } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      try { if (Date.now() - fs.statSync(lock).mtimeMs > 30_000) { fs.rmSync(lock, { force: true }); continue; } } catch {}
+      if (Date.now() > deadline) throw new Error(`timed out waiting for lock ${lock}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  try {
+    const data = readJson(file);
+    mutate(data);
+    writeJsonAtomic(file, data);
+    return data;
+  } finally { fs.rmSync(lock, { force: true }); }
+}
+
 // ---------- agy command allowlist (persistent, in agy's own settings.json) ----------
 
 function readAgySettings() {
-  try { return JSON.parse(fs.readFileSync(AGY_SETTINGS, "utf8")); } catch { return {}; }
+  try { return readJson(AGY_SETTINGS); } catch { return {}; } // read-only use: a corrupt file just means "no rules"
 }
 
 export function allowedCommands(settings = readAgySettings()) {
@@ -174,13 +225,12 @@ export function validateAllowCommand(cmd) {
 }
 
 function updateAllowlist(cmd, add) {
-  const settings = readAgySettings();
   const rule = `command(${cmd})`;
-  const allow = (settings.permissions?.allow || []).filter((r) => r !== rule);
-  if (add) allow.push(rule);
-  settings.permissions = { ...settings.permissions, allow };
-  fs.mkdirSync(path.dirname(AGY_SETTINGS), { recursive: true });
-  fs.writeFileSync(AGY_SETTINGS, `${JSON.stringify(settings, null, 2)}\n`);
+  updateJson(AGY_SETTINGS, (settings) => {
+    const allow = (settings.permissions?.allow || []).filter((r) => r !== rule);
+    if (add) allow.push(rule);
+    settings.permissions = { ...settings.permissions, allow };
+  });
 }
 
 function policyText(policy) {
@@ -239,10 +289,33 @@ Return ONLY a JSON object matching the provided schema.`;
 
 // ---------- git context for reviews ----------
 
-function git(cwd, args) {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+function git(cwd, args, input) {
+  const r = spawnSync("git", args, { cwd, input, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${(r.stderr || "").trim()}`);
   return r.stdout;
+}
+
+// HEAD, or the empty tree in a repo with no commits yet, so `git diff <base>` always means
+// "everything in the working tree that differs from the last commit" (staged and unstaged alike).
+function diffBase(cwd) {
+  try { return git(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"]).trim(); } catch {}
+  return git(cwd, ["hash-object", "-t", "tree", "--stdin"], "").trim();
+}
+
+// Content fingerprint of the whole uncommitted state (tracked diff + full untracked bytes), independent of
+// what gets truncated for the prompt, so the review gate notices a change anywhere.
+export function worktreeFingerprint(cwd) {
+  const h = crypto.createHash("sha256");
+  h.update(spawnSync("git", ["diff", diffBase(cwd), "--binary"], { cwd, maxBuffer: 1024 * 1024 * 1024 }).stdout || "");
+  for (const f of git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean)) {
+    const p = path.join(cwd, f);
+    h.update(`\0${f}\0`);
+    try {
+      const st = fs.lstatSync(p);
+      h.update(st.isSymbolicLink() ? `link:${fs.readlinkSync(p)}` : st.isFile() ? fs.readFileSync(p) : "special");
+    } catch { h.update("missing"); }
+  }
+  return h.digest("hex");
 }
 
 function defaultBase(cwd) {
@@ -260,14 +333,14 @@ export function collectReviewContext(cwd, { base, scope = "auto", commit, pr }) 
     const body = git(cwd, ["show", "--no-color", "--format=commit %H%nAuthor: %an%nDate: %ad%n%n%B", commit]);
     return finishContext({ label: `commit ${commit}`, scope: "commit", body, stat: git(cwd, ["show", "--stat", "--format=", commit]) });
   }
-  const hasHead = (() => { try { git(cwd, ["rev-parse", "--verify", "HEAD"]); return true; } catch { return false; } })();
+  const from = diffBase(cwd);
   const dirty = git(cwd, ["status", "--porcelain", "--untracked-files=all"]).trim();
   if (scope === "auto") scope = base ? "branch" : dirty ? "working-tree" : "branch";
 
   let label, diff, extra = "";
   if (scope === "working-tree") {
     label = "uncommitted working-tree changes (staged + unstaged + untracked)";
-    diff = hasHead ? git(cwd, ["diff", "HEAD", "--no-color"]) : git(cwd, ["diff", "--cached", "--no-color"]);
+    diff = git(cwd, ["diff", from, "--no-color"]);
     const untracked = git(cwd, ["ls-files", "--others", "--exclude-standard"]).split("\n").filter(Boolean);
     for (const f of untracked) {
       let body;
@@ -285,7 +358,7 @@ export function collectReviewContext(cwd, { base, scope = "auto", commit, pr }) 
   } else {
     throw new Error(`unknown --scope ${scope} (use auto|working-tree|branch)`);
   }
-  const stat = scope === "branch" ? git(cwd, ["diff", "--stat", `${base}...HEAD`]) : hasHead ? git(cwd, ["diff", "--stat", "HEAD"]) : "";
+  const stat = git(cwd, scope === "branch" ? ["diff", "--stat", `${base}...HEAD`] : ["diff", "--stat", from]);
   return finishContext({ label, scope, body: diff + extra, stat });
 }
 
@@ -307,6 +380,34 @@ function prContext(cwd, pr) {
   const meta = JSON.parse(gh(["pr", "view", pr, "--json", "number,title,body,baseRefName,headRefName,url"]));
   const body = `### PR #${meta.number}: ${meta.title} (${meta.headRefName} -> ${meta.baseRefName})\n${meta.url}\n\n${meta.body || ""}\n\n### DIFF\n${gh(["pr", "diff", pr])}`;
   return finishContext({ label: `pull request #${meta.number} (${meta.title})`, scope: "pr", body, stat: "" });
+}
+
+// ---------- process groups ----------
+
+// agy runs in its own process group so cancel can stop it together with every test runner or server it
+// started. Groups owned by this process are killed if we are terminated or exit.
+const activeGroups = new Set();
+let signalsHooked = false;
+
+function signalGroup(pid, sig) {
+  try { process.kill(-pid, sig); return true; } catch { try { process.kill(pid, sig); return true; } catch { return false; } }
+}
+
+function trackGroup(pid) {
+  activeGroups.add(pid);
+  if (signalsHooked) return;
+  signalsHooked = true;
+  const killAll = () => { for (const g of activeGroups) signalGroup(g, "SIGTERM"); };
+  process.on("exit", killAll);
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(sig, () => { killAll(); process.exit(128 + (sig === "SIGINT" ? 2 : sig === "SIGHUP" ? 1 : 15)); });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitUntil(check, ms) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) { if (check()) return true; await sleep(100); }
+  return check();
 }
 
 // ---------- run agy ----------
@@ -349,7 +450,17 @@ export function runJob(job) {
       saveJob(job);
       return resolve(job);
     }
-    const child = spawn(bin, job.agyArgs, { cwd: job.runCwd || job.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" } });
+    const finalizeCancelled = () => {
+      Object.assign(job, { status: "cancelled", finishedAt: new Date().toISOString() });
+      if (job.worktree) removeWorktree(job.repoRoot, job.worktree);
+      job.rendered = render(job);
+      saveJob(job);
+      fs.rmSync(cancelFile(job.id), { force: true });
+      resolve(job);
+    };
+    if (fs.existsSync(cancelFile(job.id))) return finalizeCancelled(); // cancelled before agy even started
+    const child = spawn(bin, job.agyArgs, { cwd: job.runCwd || job.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" }, detached: true });
+    if (child.pid) trackGroup(child.pid);
     Object.assign(job, { status: "running", agyPid: child.pid, startedAt: new Date().toISOString() });
     saveJob(job);
     // agy may exit before reading the prompt (bad flag, auth failure); that must fail the job, not crash us.
@@ -391,7 +502,8 @@ export function runJob(job) {
     child.on("close", (code) => {
       onLine(buf);
       log.end();
-      if (loadJob(job.id)?.status === "cancelled") return resolve(loadJob(job.id));
+      activeGroups.delete(child.pid);
+      if (fs.existsSync(cancelFile(job.id))) return finalizeCancelled();
       job.exitCode = code;
       job.finishedAt = new Date().toISOString();
       job.touchedFiles = [...touched];
@@ -503,11 +615,9 @@ async function launch(job, o) {
   pruneJobs();
   saveJob(job);
   if (o.background) {
+    // The worker is the job's only writer from here on (it records its own pid); we never save it again.
     const child = spawn(process.execPath, [SELF, "_worker", job.id], { detached: true, stdio: "ignore", cwd: job.cwd });
     child.unref();
-    job.pid = child.pid;
-    job.status = "running";
-    saveJob(job);
     return `agy ${job.kind} started in the background as \`${job.id}\`.\nCheck progress with \`/agy:status ${job.id}\` and fetch the output with \`/agy:result ${job.id}\`.`;
   }
   job.pid = process.pid;
@@ -539,22 +649,41 @@ async function cmdTask(o, cwd) {
 // agents never clobber each other; the result comes back as a patch applied with /agy:apply.
 function createWorktree(cwd, id) {
   const root = git(cwd, ["rev-parse", "--show-toplevel"]).trim();
-  git(root, ["rev-parse", "--verify", "HEAD"]);
+  try { git(root, ["rev-parse", "--verify", "--quiet", "HEAD"]); } catch { throw new Error("--worktree needs at least one commit in the repository"); }
+  // porcelain v2 marks submodules as "S<c><m><u>"; anything but "S..." is submodule state we cannot replicate.
+  const dirtySub = git(root, ["status", "--porcelain=v2"]).split("\n").find((l) => /^[12] \S\S S(?!\.\.\.)/.test(l));
+  if (dirtySub) throw new Error(`--worktree does not support submodules with uncommitted changes (${dirtySub.split(" ").pop()}); commit or stash inside the submodule first`);
   const worktree = path.join(DATA_DIR, "worktrees", id);
   git(root, ["worktree", "add", "--detach", worktree, "HEAD"]);
-  const diff = spawnSync("git", ["diff", "HEAD", "--binary"], { cwd: root, maxBuffer: 256 * 1024 * 1024 }).stdout;
-  if (diff?.length) {
-    const r = spawnSync("git", ["apply", "--whitespace=nowarn"], { cwd: worktree, input: diff });
-    if (r.status !== 0) throw new Error(`could not replicate uncommitted changes into the worktree: ${r.stderr}`);
+  try {
+    const diff = spawnSync("git", ["diff", "HEAD", "--binary"], { cwd: root, maxBuffer: 1024 * 1024 * 1024 }).stdout;
+    if (diff?.length) {
+      const r = spawnSync("git", ["apply", "--whitespace=nowarn"], { cwd: worktree, input: diff });
+      if (r.status !== 0) throw new Error(`could not replicate uncommitted changes into the worktree: ${r.stderr}`);
+    }
+    for (const f of git(root, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean)) {
+      const src = path.join(root, f), dest = path.join(worktree, f);
+      const st = fs.lstatSync(src);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      // Recreate symlinks as symlinks: copying the target could pull files from outside the repo into the patch.
+      if (st.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(src), dest);
+      else if (st.isFile()) fs.copyFileSync(src, dest);
+    }
+    git(worktree, ["add", "-A"]);
+    git(worktree, ["-c", "user.name=agy-plugin", "-c", "user.email=agy-plugin@localhost", "-c", "commit.gpgsign=false",
+      "commit", "--no-verify", "--allow-empty", "-q", "-m", "agy-plugin snapshot"]);
+    return { worktree, repoRoot: root, worktreeBase: git(worktree, ["rev-parse", "HEAD"]).trim(), runCwd: path.join(worktree, path.relative(root, cwd)) };
+  } catch (e) {
+    removeWorktree(root, worktree);
+    throw e;
   }
-  for (const f of git(root, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean)) {
-    fs.mkdirSync(path.dirname(path.join(worktree, f)), { recursive: true });
-    fs.copyFileSync(path.join(root, f), path.join(worktree, f));
+}
+
+function removeWorktree(root, worktree) {
+  try { git(root, ["worktree", "remove", "--force", worktree]); } catch {
+    fs.rmSync(worktree, { recursive: true, force: true });
+    try { git(root, ["worktree", "prune"]); } catch {}
   }
-  git(worktree, ["add", "-A"]);
-  git(worktree, ["-c", "user.name=agy-plugin", "-c", "user.email=agy-plugin@localhost", "-c", "commit.gpgsign=false",
-    "commit", "--no-verify", "--allow-empty", "-q", "-m", "agy-plugin snapshot"]);
-  return { worktree, repoRoot: root, worktreeBase: git(worktree, ["rev-parse", "HEAD"]).trim(), runCwd: path.join(worktree, path.relative(root, cwd)) };
 }
 
 // Build/test by-products that should never ride along in a patch even when the repo does not ignore them.
@@ -573,28 +702,37 @@ function finalizeWorktree(job) {
   } catch (e) {
     job.error = `${job.error ? `${job.error}\n` : ""}collecting the worktree patch failed: ${e.message}`;
   }
-  try { git(job.repoRoot, ["worktree", "remove", "--force", job.worktree]); } catch {}
+  removeWorktree(job.repoRoot, job.worktree);
 }
 
 function cmdApply(o, cwd) {
-  const job = o.text ? findJob(o.text, cwd) : listJobs(cwd).find((j) => j.patch && !j.applied);
-  if (!job) return o.text ? `No job ${o.text}.` : "No unapplied agy worktree patch in this workspace.";
-  if (!job.patch || !fs.existsSync(job.patch)) return `Job \`${job.id}\` has no patch (agy made no changes, or it was not a --worktree job).`;
+  const job = o.text ? findJob(o.text, cwd, o.all) : listJobs(cwd).find((j) => j.patch && !j.applied);
+  if (!job) return o.text ? `No job ${o.text} in this workspace.` : "No unapplied agy worktree patch in this workspace.";
+  const patch = path.join(JOBS_DIR, `${job.id}.patch`); // never trust a path stored in the job file
+  if (!job.patch || !fs.existsSync(patch)) return `Job \`${job.id}\` has no patch (agy made no changes, or it was not a --worktree job).`;
   if (job.applied) return `Patch from \`${job.id}\` was already applied.`;
-  const run = (args) => spawnSync("git", ["apply", ...args, job.patch], { cwd: job.repoRoot, encoding: "utf8" });
-  let r = run(["--check"]);
+  const root = git(cwd, ["rev-parse", "--show-toplevel"]).trim();
+  const apply = (dir, args) => spawnSync("git", ["apply", ...args, patch], { cwd: dir, encoding: "utf8" });
   let how = "cleanly";
-  if (r.status !== 0) {
-    r = run(["--3way"]);
-    how = "with a 3-way merge";
-    if (r.status !== 0) return `Could not apply \`${job.id}\`:\n\`\`\`\n${(r.stderr || "").trim()}\n\`\`\`\nResolve conflicts manually, or inspect the patch at ${job.patch}.`;
+  if (apply(root, ["--check"]).status === 0) {
+    const r = apply(root, []);
+    if (r.status !== 0) return `git apply failed; nothing was changed:\n\`\`\`\n${r.stderr.trim()}\n\`\`\``;
   } else {
-    r = run([]);
-    if (r.status !== 0) return `git apply failed: ${r.stderr}`;
+    // A failed --3way can leave the tree half-modified, so rehearse it on a scratch copy of the current state first.
+    const trial = createWorktree(root, jobId("task"));
+    let t;
+    try { t = apply(trial.worktree, ["--3way"]); } finally { removeWorktree(root, trial.worktree); }
+    const conflicts = t.status !== 0 || /conflict/i.test(t.stderr || "");
+    if (conflicts && !o.force) {
+      return `The patch from \`${job.id}\` does not apply cleanly to the current working tree; **nothing was changed**.\n\`\`\`\n${(t.stderr || "").trim()}\n\`\`\`\nOptions: inspect ${patch}, ask agy to redo it on the current state, or re-run \`/agy:apply ${job.id} --force\` to apply with conflict markers.`;
+    }
+    const r = apply(root, ["--3way"]);
+    how = conflicts ? "with conflict markers (resolve them; see `git status`)" : "with a 3-way merge";
+    if (r.status !== 0 && !conflicts) return `git apply --3way failed unexpectedly; check \`git status\`:\n\`\`\`\n${r.stderr.trim()}\n\`\`\``;
   }
   job.applied = true;
   saveJob(job);
-  return `Applied agy patch from \`${job.id}\` ${how}${/conflict/i.test(r.stderr || "") ? " (with conflicts — check `git status`)" : ""}:\n\`\`\`\n${job.patchStat}\n\`\`\``;
+  return `Applied agy patch from \`${job.id}\` ${how}:\n\`\`\`\n${job.patchStat}\n\`\`\``;
 }
 
 // ---------- multi-model comparison ----------
@@ -609,13 +747,19 @@ function resolveModels(list, fallback) {
 // Runs one job per model in parallel (in this process) and returns them when all have finished.
 async function fanOut(models, makeJob) {
   pruneJobs();
-  const jobs = models.map((model) => {
-    const job = makeJob(model);
-    job.agyArgs.push("--model", model);
-    Object.assign(job, { model, pid: process.pid });
-    saveJob(job);
-    return job;
-  });
+  const jobs = [];
+  try {
+    for (const model of models) {
+      const job = makeJob(model);
+      job.agyArgs.push("--model", model);
+      Object.assign(job, { model, pid: process.pid });
+      jobs.push(job);
+    }
+  } catch (e) {
+    for (const j of jobs) if (j.worktree) removeWorktree(j.repoRoot, j.worktree); // no half-created fan-out left behind
+    throw e;
+  }
+  jobs.forEach(saveJob);
   return Promise.all(jobs.map(runJob));
 }
 
@@ -711,8 +855,8 @@ function readTimeline(id) {
 
 function cmdStatus(o, cwd) {
   if (o.text) {
-    const job = findJob(o.text, cwd);
-    if (!job) throw new Error(`no job ${o.text}`);
+    const job = findJob(o.text, cwd, o.all);
+    if (!job) throw new Error(`no job ${o.text} in this workspace (use --all to search every workspace)`);
     if (o.json) return JSON.stringify(job, null, 2);
     const lines = [`# ${job.id} — ${job.status}`, `- kind: ${job.kind} · policy: ${job.policy} · elapsed: ${fmtElapsed(job)} · steps: ${job.steps || 0}`,
       `- task: ${job.title}`, job.progress ? `- last activity: ${job.progress}` : "", job.conversationId ? `- agy conversation: ${job.conversationId}` : ""];
@@ -730,31 +874,39 @@ function cmdStatus(o, cwd) {
 }
 
 async function cmdResult(o, cwd) {
-  let job = o.text ? findJob(o.text, cwd) : listJobs(cwd).map(refresh).find((j) => (o.wait ? true : j.status !== "running" && j.status !== "queued"));
+  let job = o.text ? findJob(o.text, cwd, o.all) : listJobs(cwd).map(refresh).find((j) => (o.wait ? true : j.status !== "running" && j.status !== "queued"));
   if (!job) throw new Error(o.text ? `no job ${o.text}` : "no finished agy jobs in this workspace");
   // --wait blocks until the job finishes (bounded by --timeout seconds, default 540 to fit a 10-minute Bash call).
   const deadline = Date.now() + Number(o.timeout || 540) * 1000;
   while (o.wait && ["running", "queued"].includes(job.status) && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 2000));
-    job = refresh(loadJob(job.id));
+    job = refresh(loadJob(job.id) || job);
   }
   if (job.status === "running" || job.status === "queued") return `Job \`${job.id}\` is still ${job.status} (${fmtElapsed(job)}, last activity: ${job.progress || "starting"}). Try again later or \`/agy:cancel ${job.id}\`.`;
   if (o.json) return JSON.stringify(job, null, 2);
   return job.rendered || render(job);
 }
 
-function cmdCancel(o, cwd) {
-  const job = o.text ? findJob(o.text, cwd) : listJobs(cwd).map(refresh).find((j) => j.status === "running");
-  if (!job) return o.text ? `No job ${o.text}.` : "No running agy job in this workspace.";
-  if (job.status !== "running") return `Job \`${job.id}\` is already ${job.status}.`;
-  for (const pid of [job.agyPid, job.pid]) {
-    if (!pid || pid === process.pid) continue;
-    try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch {} }
+// Cancel = drop a marker, stop agy's whole process group (TERM, then KILL), and let the job's owner write the
+// final state and clean up. Only if the owner is gone do we finalize here, so there is a single writer.
+async function cmdCancel(o, cwd) {
+  const job = o.text ? findJob(o.text, cwd, o.all) : listJobs(cwd).map(refresh).find((j) => j.status === "running" || j.status === "queued");
+  if (!job) return o.text ? `No job ${o.text} in this workspace.` : "No running agy job in this workspace.";
+  if (job.status !== "running" && job.status !== "queued") return `Job \`${job.id}\` is already ${job.status}.`;
+  fs.writeFileSync(cancelFile(job.id), "");
+  const agyPid = loadJob(job.id)?.agyPid;
+  if (agyPid && signalGroup(agyPid, "SIGTERM") && !(await waitUntil(() => !isAlive(agyPid), 5000))) signalGroup(agyPid, "SIGKILL");
+  const finished = () => { const j = loadJob(job.id); return !j || j.status !== "running" || !j.pid || !isAlive(j.pid); };
+  await waitUntil(finished, 10_000);
+  const cur = loadJob(job.id);
+  if (cur && (cur.status === "running" || cur.status === "queued")) {
+    if (cur.pid && isAlive(cur.pid) && cur.pid !== process.pid) signalGroup(cur.pid, "SIGKILL");
+    Object.assign(cur, { status: "cancelled", finishedAt: new Date().toISOString() });
+    if (cur.worktree) removeWorktree(cur.repoRoot, cur.worktree);
+    cur.rendered = render(cur);
+    saveJob(cur);
   }
-  Object.assign(job, { status: "cancelled", finishedAt: new Date().toISOString() });
-  if (job.worktree) try { git(job.repoRoot, ["worktree", "remove", "--force", job.worktree]); } catch {}
-  job.rendered = render(job);
-  saveJob(job);
+  fs.rmSync(cancelFile(job.id), { force: true });
   return `Cancelled \`${job.id}\`.`;
 }
 
@@ -768,10 +920,10 @@ function cmdSetup(o, cwd) {
   if (o["allow-command"]) updateAllowlist(validateAllowCommand(o["allow-command"]), true);
   if (o["revoke-command"]) updateAllowlist(String(o["revoke-command"]).trim().replace(/\s+/g, " "), false);
   if (o["enable-review-gate"] || o["disable-review-gate"]) {
-    const cfg = loadConfig();
-    cfg.reviewGate = cfg.reviewGate || {};
-    if (o["enable-review-gate"]) cfg.reviewGate[cwd] = true; else delete cfg.reviewGate[cwd];
-    saveConfig(cfg);
+    updateConfig((cfg) => {
+      cfg.reviewGate = cfg.reviewGate || {};
+      if (o["enable-review-gate"]) cfg.reviewGate[cwd] = true; else delete cfg.reviewGate[cwd];
+    });
   }
   const bin = findAgy();
   const report = { node: process.version, agy: bin, version: null, authenticated: false, quota: null, models: [], dataDir: DATA_DIR };
@@ -805,14 +957,8 @@ function cmdSetup(o, cwd) {
 
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 
-function loadConfig() {
-  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")); } catch { return {}; }
-}
-
-function saveConfig(cfg) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
-}
+const loadConfig = () => readJson(CONFIG_FILE);
+const updateConfig = (mutate) => updateJson(CONFIG_FILE, mutate);
 
 // ---------- Claude session -> agy transfer ----------
 
@@ -918,44 +1064,49 @@ export function parseGate(text) {
 
 async function hookStop(input) {
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const running = listJobs(cwd).map(refresh).find((j) => j.status === "running");
+  const running = listJobs(cwd).map(refresh).find((j) => j.status === "running" || j.status === "queued");
   if (running) console.error(`agy job ${running.id} is still running — /agy:status ${running.id}, /agy:cancel ${running.id}.`);
 
-  const cfg = loadConfig();
-  if (!cfg.reviewGate?.[cwd]) return;
+  if (!loadConfig().reviewGate?.[cwd]) return;
   if (!findAgy()) return console.error("agy review gate skipped: agy not found (run /agy:setup).");
-  let ctx;
-  try { ctx = collectReviewContext(cwd, { scope: "working-tree" }); } catch { return; } // not a git repo
+  let ctx, hash;
+  try { ctx = collectReviewContext(cwd, { scope: "working-tree" }); hash = worktreeFingerprint(cwd); } catch { return; } // not a git repo
   if (ctx.empty) return;
 
-  // Review each distinct working-tree state once; stop re-blocking after GATE_MAX_BLOCKS rounds.
   const key = input.session_id || cwd;
-  const hash = crypto.createHash("sha256").update(ctx.body).digest("hex");
-  const st = cfg.gateState?.[key] || { blocks: 0 };
-  if (st.hash === hash) return;
-  if (st.blocks >= GATE_MAX_BLOCKS) {
-    console.error(`agy review gate: blocked ${GATE_MAX_BLOCKS} times in a row; letting this stop through. Run /agy:review for a full pass.`);
-    return saveGateState(key, { hash, blocks: 0 });
+  const st = loadConfig().gateState?.[key] || { blocks: 0 };
+  const block = (reason, jobRef) => process.stdout.write(`${JSON.stringify({ decision: "block", reason: `agy stop-time review found issues to fix before stopping (job ${jobRef}):\n${reason}` })}\n`);
+  const giveUp = () => console.error(`agy review gate: blocked ${GATE_MAX_BLOCKS} times in a row; letting this stop through. Run /agy:review for a full pass.`);
+
+  // Same state as last time: an ALLOW stands, and so does a BLOCK (until the consecutive-block cap).
+  if (st.hash === hash) {
+    if (st.verdict !== "block") return;
+    if (st.blocks >= GATE_MAX_BLOCKS) return giveUp();
+    saveGateState(key, { ...st, blocks: st.blocks + 1 });
+    return block(st.reason, st.jobId);
+  }
+  if (st.verdict === "block" && st.blocks >= GATE_MAX_BLOCKS) {
+    giveUp();
+    return saveGateState(key, { hash, verdict: "allow", blocks: 0 });
   }
 
   const last = String(input.last_assistant_message || "").trim();
-  const prompt = `${preamble(cwd, "read", [])}\n\n${GATE_PROMPT}\n${last ? `\nCLAUDE'S FINAL MESSAGE FOR THIS TURN:\n${short(last, 4000)}\n` : ""}\nCHANGES: ${ctx.label}\n${ctx.stat ? `### STAT\n${ctx.stat}\n` : ""}### DIFF\n${ctx.body}`;
-  const job = await runJob(newJob("gate", cwd, { "add-dir": [], timeout: "840", text: "stop-time review gate" }, "read", prompt));
+  const prompt = `${preamble(cwd, "read", [])}\n\n${GATE_PROMPT}\n${last ? `\nCLAUDE'S FINAL MESSAGE FOR THIS TURN:\n${short(last, 4000)}\n` : ""}\nCHANGES: ${ctx.label}\n${ctx.stat ? `### STAT\n${ctx.stat}\n` : ""}### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
+  const job = newJob("gate", cwd, { "add-dir": [], timeout: "840", text: "stop-time review gate" }, "read", prompt);
+  job.pid = process.pid;
+  await runJob(job);
   const verdict = job.status === "completed" && parseGate(job.result?.response);
   if (!verdict) {
     // Fail open: an agy outage or quota problem must not trap the Claude session.
     return console.error(`agy review gate could not decide (job ${job.id}, ${job.status}); allowing stop. See /agy:result ${job.id}.`);
   }
-  saveGateState(key, { hash, blocks: verdict.allow ? 0 : st.blocks + 1 });
-  if (!verdict.allow) {
-    process.stdout.write(`${JSON.stringify({ decision: "block", reason: `agy stop-time review found issues to fix before stopping (job ${job.id}):\n${verdict.reason}` })}\n`);
-  }
+  if (verdict.allow) return saveGateState(key, { hash, verdict: "allow", blocks: 0 });
+  saveGateState(key, { hash, verdict: "block", reason: verdict.reason, jobId: job.id, blocks: (st.verdict === "block" ? st.blocks : 0) + 1 });
+  block(verdict.reason, job.id);
 }
 
 function saveGateState(key, state) {
-  const cfg = loadConfig();
-  cfg.gateState = { ...cfg.gateState, [key]: state };
-  saveConfig(cfg);
+  updateConfig((cfg) => { cfg.gateState = { ...cfg.gateState, [key]: state }; });
 }
 
 const COMMANDS = { task: cmdTask, review: cmdReview, research: cmdResearch, image: cmdImage, status: cmdStatus, result: cmdResult, cancel: cmdCancel, setup: cmdSetup, transfer: cmdTransfer, apply: cmdApply, compare: cmdCompare, "resume-candidate": cmdResumeCandidate };

@@ -13,17 +13,17 @@ Helper: `node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" <subcommand> "<a
 | `task` | delegate coding work / questions about the workspace |
 | `review` | structured code review of working tree, branch (`--base`), one commit (`--commit`), or a GitHub PR (`--pr`); `--adversarial`, focus text |
 | `compare` | same read-only question to several models in parallel (`--models pro,opus,gpt`) |
-| `apply [id]` | apply the patch from a `--worktree` task |
+| `apply [id] [--force]` | apply the patch from a `--worktree` task; if it would conflict, nothing is changed unless `--force` (then conflict markers are written) |
 | `transfer` | hand the current Claude session to agy |
 | `research` | Google-Search-backed answer with source URLs |
 | `image` | generate images, copied to `agy-images/` or `--out` |
-| `status [id] [--all]`, `result [id]`, `cancel [id]` | background job management |
+| `status [id] [--all]`, `result [id] [--wait]`, `cancel [id]` | background job management (ids are looked up in the current workspace; `--all` searches every workspace) |
 | `resume-candidate` | JSON: is there an agy conversation in this workspace to continue? |
-| `setup` | install / auth / quota / model check |
+| `setup` | check install, sign-in, quota and models (it never installs or signs in); toggle the review gate; manage the command allowlist |
 
-Flags shared by task, review, research, image:
+Flags (policy flags apply to `task` and `research`; `review`, `compare`, `critique`, `transfer` and `image` always run read-only):
 - Policy: default read-only · `--write` file edits (agy `--mode accept-edits`) · `--worktree` file edits in an isolated git worktree, returned as a patch · `--yolo` shell + URLs (agy `--dangerously-skip-permissions`, explicit user opt-in only).
-- Commands allowlisted via `setup --allow-command "<cmd>"` (stored in agy's settings.json) can run in every policy; agy is told exactly which ones, so it can run tests and iterate.
+- Commands allowlisted via `setup --allow-command "<cmd>"` are rules in agy's own global settings.json: agy itself enforces them (anything else is denied) in every policy, including your interactive agy sessions. agy is told which ones exist so it can run tests and iterate.
 - `--background` detaches and returns a job id. `--model <id|pro|flash|opus|sonnet|gpt>` (aliases resolve to the newest matching model). `--effort low|medium|high`. `--add-dir <dir>` (repeatable). `--timeout <seconds>`. `--agent <name>` selects a custom agy agent. `--json` prints the raw job record.
 - `--models a,b` on `task --worktree`: best-of-N, one independent attempt and patch per model.
 - `--prompt-file <path>` appends a file's contents to the prompt; use it for large logs or specs (argv entries are capped at 128 KB).

@@ -8,4 +8,6 @@ allowed-tools: Bash(node:*)
 
 Present the output. If agy is not found, tell the user to install the Google Antigravity CLI and re-run `/agy:setup`. If it is not authenticated, tell them to run `! agy` once and complete sign-in. Do not attempt to install or authenticate on their behalf.
 
-When the review gate is enabled: every time Claude is about to stop in this workspace with uncommitted changes that agy has not yet seen, agy reviews them and can send Claude back to fix concrete defects. It uses agy quota, adds latency to each stop, gives up after 3 consecutive blocks, and lets the stop through if agy fails.
+When the review gate is enabled: every time Claude is about to stop in this workspace with uncommitted changes, agy reviews any state it has not seen yet and can send Claude back to fix concrete defects. A state agy blocked stays blocked (without another agy call) until the code changes; after 3 consecutive blocks the gate lets the stop through, and it also lets it through if agy fails. It uses agy quota and adds latency to stops with new changes.
+
+`--allow-command` adds a rule to agy's own global settings.json: it applies to every agy session on this machine, including interactive ones. Broad rules (`python3`, `bash`, `git`, …) and shell metacharacters are refused.

@@ -32,7 +32,7 @@ Requirements: Node ≥ 18, and `agy` on `PATH` (or set `AGY_BIN`). You must have
 
 This is off by default. Turn it on per workspace with `/agy:setup --enable-review-gate`. When Claude is about to stop and the working tree has uncommitted changes that agy has not reviewed yet, agy reviews them. If it finds a concrete defect, it blocks the stop and sends Claude back with the findings.
 
-- Each distinct working-tree state is reviewed only once. A stop with no changes, or with the same changes, costs nothing.
+- Each distinct working-tree state is reviewed only once, using a fingerprint of the full content. A state that agy blocked stays blocked until the code changes; stopping again does not call agy a second time.
 - After 3 blocks in a row, the gate lets the stop through, so it cannot loop forever.
 - If agy fails (outage, quota, timeout), the stop goes through. A broken gate never traps the session.
 
@@ -43,9 +43,9 @@ Claude can also call the **`agy-delegate`** subagent on its own. It does this fo
 - **Permission policy.** agy's headless mode cannot ask you for approval. Any tool outside the chosen policy stops the run, and the output tells you so.
   - *(default)* read-only: agy can read files but cannot edit them or run shell commands.
   - `--write`: agy can edit files in the workspace (`agy --mode accept-edits`).
-  - `--worktree`: agy edits a throwaway git worktree seeded with your current uncommitted and untracked files. The result comes back as a patch you apply with `/agy:apply`. Your own working tree is never touched, so several agy tasks and Claude can work at the same time.
+  - `--worktree`: agy edits a throwaway git worktree seeded with your current uncommitted and untracked files (symlinks are kept as links). It needs at least one commit and refuses to run when a submodule has uncommitted changes. The result comes back as a patch you apply with `/agy:apply`. Your own working tree is never touched, so several agy tasks and Claude can work at the same time.
   - `--yolo`: agy can also run shell commands and fetch URLs (`agy --dangerously-skip-permissions`). Only use this when you ask for it explicitly.
-- **Letting agy run tests.** Use `/agy:setup --allow-command "npm test"`. The rule is stored in agy's own `settings.json` and can be removed with `--revoke-command`. agy is told exactly which commands it may run, so it can run the tests and iterate until they pass, without `--yolo`. Rules that are too broad (`python3`, `bash`, `git`, …) and shell metacharacters are refused.
+- **Letting agy run tests.** Use `/agy:setup --allow-command "npm test"`. The rule is stored in agy's own global `settings.json`, so it also applies to your interactive agy sessions. Remove it with `--revoke-command`. agy is told exactly which commands it may run, so it can run the tests and iterate until they pass, without `--yolo`. Rules that are too broad (`python3`, `bash`, `git`, …) and shell metacharacters are refused.
 - **Best-of-N.** `/agy:task --worktree --models pro,opus,gpt <task>` has each model implement the task on its own in its own worktree. Claude compares the patches and you apply the one you prefer.
 - `--prompt-file <path>` adds a file's contents to the prompt. Use it for large logs, stack traces or specs; a single command-line argument is capped at 128 KB on Linux.
 - `/agy:result <id> --wait` blocks until a background job finishes.

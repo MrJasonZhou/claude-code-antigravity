@@ -107,8 +107,18 @@ fs.rmSync(path.join(tmp, "gate-calls")); // setup itself calls agy for version/q
 const blocked = JSON.parse(stop());
 assert.equal(blocked.decision, "block");
 assert.match(blocked.reason, /off by one/);
-assert.equal(stop(), ""); // unchanged tree: not reviewed again
+// Unchanged tree after a BLOCK: the block stands (no new agy call) until the consecutive-block cap, then lets go.
+assert.match(JSON.parse(stop()).reason, /off by one/);
+assert.match(JSON.parse(stop()).reason, /off by one/);
+assert.equal(stop(), "");
 assert.equal(fs.readFileSync(path.join(tmp, "gate-calls"), "utf8"), "x");
+// A change beyond the prompt's truncation window still changes the fingerprint.
+const fp1 = m.worktreeFingerprint(repo);
+fs.writeFileSync(path.join(repo, "big.bin"), Buffer.alloc(700_000, 1));
+const fp2 = m.worktreeFingerprint(repo);
+fs.writeFileSync(path.join(repo, "big.bin"), Buffer.alloc(700_000, 2)); // same size, different bytes
+assert.ok(fp1 !== fp2 && fp2 !== m.worktreeFingerprint(repo));
+fs.rmSync(path.join(repo, "big.bin"));
 
 // allowlist validation
 assert.equal(m.validateAllowCommand("  npm   test "), "npm test");
@@ -189,5 +199,82 @@ assert.equal(cctx.scope, "commit");
 assert.match(cctx.body, /\+one/);
 
 assert.equal(m.demote("## R\n```sh\n# keep\n```\n# H"), "#### R\n```sh\n# keep\n```\n### H");
+
+// ---- regression tests for the Codex review findings ----
+
+// #12: a value flag must not swallow the next flag
+assert.throws(() => m.parseArgs(["--model", "--write", "fix"]), /needs a value/);
+
+// #1: job ids are validated; traversal never reaches the filesystem
+assert.equal(m.JOB_ID.test("../../x"), false);
+assert.match(execFileSync("node", [COMPANION, "status", "../../etc/passwd"], { cwd: wrepo, env: wenv, encoding: "utf8" }), /agy-companion error: no job/);
+assert.match(execFileSync("node", [COMPANION, "cancel", "../x"], { cwd: wrepo, env: wenv, encoding: "utf8" }), /No job/);
+
+// #11: corrupt config / agy settings are never overwritten
+const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "agy-home-"));
+fs.mkdirSync(path.join(fakeHome, ".gemini", "antigravity-cli"), { recursive: true });
+const settingsFile = path.join(fakeHome, ".gemini", "antigravity-cli", "settings.json");
+fs.writeFileSync(settingsFile, "{ broken");
+const hout = execFileSync("node", [COMPANION, "setup", "--allow-command", "npm test"], { cwd: wrepo, env: { ...wenv, HOME: fakeHome }, encoding: "utf8" });
+assert.match(hout, /not valid JSON/);
+assert.equal(fs.readFileSync(settingsFile, "utf8"), "{ broken");
+fs.writeFileSync(settingsFile, JSON.stringify({ model: "keep-me", permissions: { allow: ["command(free)"] } }));
+execFileSync("node", [COMPANION, "setup", "--allow-command", "npm test"], { cwd: wrepo, env: { ...wenv, HOME: fakeHome } });
+const saved = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+assert.equal(saved.model, "keep-me");
+assert.deepEqual(saved.permissions.allow, ["command(free)", "command(npm test)"]);
+
+// #9: unborn repo — staged-then-modified content is what gets reviewed
+const unborn = fs.mkdtempSync(path.join(os.tmpdir(), "agy-unborn-"));
+execFileSync("git", ["init", "-q"], { cwd: unborn });
+fs.writeFileSync(path.join(unborn, "app.js"), "v1\n");
+execFileSync("git", ["add", "app.js"], { cwd: unborn });
+fs.writeFileSync(path.join(unborn, "app.js"), "v2\n");
+assert.match(m.collectReviewContext(unborn, { scope: "working-tree" }).body, /\+v2/);
+
+// #8: untracked symlinks are recreated as links, never dereferenced into the worktree
+const secret = path.join(fakeHome, "secret.txt");
+fs.writeFileSync(secret, "TOP-SECRET");
+fs.symlinkSync(secret, path.join(wrepo, "link"));
+const linkAgy = path.join(tmp, "link-agy");
+fs.writeFileSync(linkAgy, `#!/usr/bin/env node
+const fs = require("fs");
+if (!fs.lstatSync("link").isSymbolicLink()) process.exit(6);
+fs.writeFileSync("b.txt", "b\\n");
+console.log(JSON.stringify({event:"result",result:{conversation_id:"l",status:"SUCCESS",response:"ok"}}));
+`, { mode: 0o755 });
+const lenv = { ...process.env, AGY_BIN: linkAgy };
+const lout = execFileSync("node", [COMPANION, "task", "--worktree", "add b"], { cwd: wrepo, env: lenv, encoding: "utf8" });
+assert.match(lout, /completed/);
+const lid = /Job: `([^`]+)`/.exec(lout)[1];
+assert.doesNotMatch(fs.readFileSync(path.join(process.env.AGY_PLUGIN_DATA, "jobs", `${lid}.patch`), "utf8"), /TOP-SECRET/);
+fs.rmSync(path.join(wrepo, "link"));
+
+// #6: a conflicting patch leaves the working tree untouched unless --force
+fs.writeFileSync(path.join(wrepo, "b.txt"), "conflicting local content\n");
+const before = fs.readFileSync(path.join(wrepo, "b.txt"), "utf8");
+assert.match(execFileSync("node", [COMPANION, "apply", lid], { cwd: wrepo, env: lenv, encoding: "utf8" }), /nothing was changed/);
+assert.equal(fs.readFileSync(path.join(wrepo, "b.txt"), "utf8"), before);
+fs.rmSync(path.join(wrepo, "b.txt"));
+assert.equal(g("worktree", "list").trim().split("\n").length, 1); // trial worktree cleaned up
+
+// #4/#5: cancel stops agy and its children, and the worker cleans up its worktree
+const slowAgy = path.join(tmp, "slow-agy");
+const childPidFile = path.join(tmp, "child.pid");
+fs.writeFileSync(slowAgy, `#!/bin/sh
+cat >/dev/null
+sleep 300 & echo $! > ${childPidFile}
+wait
+`, { mode: 0o755 });
+const senv = { ...process.env, AGY_BIN: slowAgy };
+const sout = execFileSync("node", [COMPANION, "task", "--worktree", "--background", "slow"], { cwd: wrepo, env: senv, encoding: "utf8" });
+const sid = /`(task-[^`]+)`/.exec(sout)[1];
+const t0 = Date.now();
+while (!fs.existsSync(childPidFile) && Date.now() - t0 < 10_000) execFileSync("sleep", ["0.1"]);
+assert.match(execFileSync("node", [COMPANION, "cancel", sid], { cwd: wrepo, env: senv, encoding: "utf8" }), /Cancelled/);
+const grandchild = Number(fs.readFileSync(childPidFile, "utf8"));
+assert.throws(() => process.kill(grandchild, 0)); // the test-runner-like grandchild is gone too
+assert.match(execFileSync("node", [COMPANION, "status", sid], { cwd: wrepo, env: senv, encoding: "utf8" }), /— cancelled/);
+assert.equal(g("worktree", "list").trim().split("\n").length, 1);
 
 console.log("ok");
