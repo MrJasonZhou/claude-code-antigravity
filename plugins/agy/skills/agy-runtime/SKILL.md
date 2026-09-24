@@ -21,7 +21,7 @@ Helper: `node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" <subcommand> "<a
 | `resume-candidate` | JSON: is there an agy conversation in this workspace to continue? |
 | `setup` | check install, sign-in, quota and models (it never installs or signs in); toggle the review gate; manage the command allowlist |
 
-Flags (policy flags apply to `task` and `research`; `review`, `compare`, `critique`, `transfer` and `image` always run read-only):
+Flags (policy flags apply to `task` and `research`; `review`, `compare`, `transfer` and `image` always run read-only; the `/agy:critique` slash command is a read-only `task` with a fixed instruction, not a separate subcommand):
 - Policy: default read-only · `--write` file edits (agy `--mode accept-edits`) · `--worktree` file edits in an isolated git worktree, returned as a patch · `--yolo` shell + URLs (agy `--dangerously-skip-permissions`, explicit user opt-in only).
 - Commands allowlisted via `setup --allow-command "<cmd>"` are rules in agy's own global settings.json: agy itself enforces them (anything else is denied) in every policy, including your interactive agy sessions. agy is told which ones exist so it can run tests and iterate.
 - `--background` detaches and returns a job id. `--model <id|pro|flash|opus|sonnet|gpt>` (aliases resolve to the newest matching model). `--effort low|medium|high`. `--add-dir <dir>` (repeatable). `--timeout <seconds>`. `--agent <name>` selects a custom agy agent. `--json` prints the raw job record.

@@ -137,10 +137,22 @@ function isAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+// Kernel start time of a process (Linux /proc; null elsewhere). Stored next to every pid we record so a pid
+// that has since been reused by an unrelated process is never mistaken for, or signalled as, ours.
+function procStart(pid) {
+  try { return fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop().split(" ")[19]; } catch { return null; }
+}
+
+function sameProcess(pid, start) {
+  if (!pid || !isAlive(pid)) return false;
+  const now = procStart(pid);
+  return !start || !now || now === start;
+}
+
 // A job whose owner process died without writing a result is failed, not "running" forever.
 // (A background job gets its pid from the worker itself; give it a minute to show up.)
 function refresh(job) {
-  const ownerGone = job.pid ? !isAlive(job.pid) : Date.now() - Date.parse(job.createdAt) > 60_000;
+  const ownerGone = job.pid ? !sameProcess(job.pid, job.pidStart) : Date.now() - Date.parse(job.createdAt) > 60_000;
   if ((job.status === "running" || job.status === "queued") && ownerGone) {
     job.status = "failed";
     job.error = job.error || "worker process exited unexpectedly";
@@ -213,14 +225,21 @@ export function allowedCommands(settings = readAgySettings()) {
   return (settings.permissions?.allow || []).map((r) => /^command\((.+)\)$/.exec(r)?.[1]).filter((c) => c && c !== "*");
 }
 
-// A rule like command(python3) would let agy run arbitrary code; require a specific subcommand.
-const TOO_BROAD = /^(\*|sh|bash|zsh|fish|env|sudo|su|rm|python3?|node|deno|bun|perl|ruby|php|curl|wget|git|npx|pnpx|bunx|eval|exec|xargs|find|docker|kubectl)$/;
+// Rules are prefixes, so "bash -c" would allow `bash -c "<anything>"`. Refuse anything that can run arbitrary code:
+// shells/launchers/destructive or network tools in any form, and interpreters bare or with an inline-code flag.
+const NEVER = /^(\*|sh|bash|zsh|fish|dash|ksh|csh|tcsh|pwsh|powershell|cmd|env|sudo|su|doas|nohup|timeout|nice|time|eval|exec|source|xargs|find|rm|dd|curl|wget|nc|ncat|ssh|scp)$/;
+const BARE_ONLY = /^(python[0-9.]*|node|deno|bun|perl|ruby|php|lua|npx|pnpx|bunx|git|docker|podman|kubectl|make|awk|gawk|sed)$/;
+const INLINE_CODE = /^(-c|-e|-E|-p|-r|-x|--eval|--print|eval|run|exec)$/;
 
 export function validateAllowCommand(cmd) {
   const c = String(cmd || "").trim().replace(/\s+/g, " ");
   if (!c) throw new Error("empty command");
-  if (/[;&|`$<>(){}\\\n]/.test(c)) throw new Error(`"${c}": shell metacharacters are not allowed in an allow rule`);
-  if (TOO_BROAD.test(c)) throw new Error(`"${c}" is too broad; allow a specific command such as "npm test" or "pytest"`);
+  if (/[;&|`$<>(){}\\\n'"]/.test(c)) throw new Error(`"${c}": shell metacharacters and quotes are not allowed in an allow rule`);
+  const [first, second] = c.split(" ");
+  const tool = path.basename(first);
+  if (NEVER.test(tool) || (BARE_ONLY.test(tool) && (!second || INLINE_CODE.test(second)))) {
+    throw new Error(`"${c}" would let agy run arbitrary commands; allow a specific command such as "npm test", "pytest" or "python3 -m unittest"`);
+  }
   return c;
 }
 
@@ -312,7 +331,9 @@ export function worktreeFingerprint(cwd) {
     h.update(`\0${f}\0`);
     try {
       const st = fs.lstatSync(p);
-      h.update(st.isSymbolicLink() ? `link:${fs.readlinkSync(p)}` : st.isFile() ? fs.readFileSync(p) : "special");
+      // Content for normal files; size/mtime/inode for huge ones (dumps, ISOs) so a stop never reads gigabytes.
+      h.update(st.isSymbolicLink() ? `link:${fs.readlinkSync(p)}` : !st.isFile() ? "special"
+        : st.size > 64 * 1024 * 1024 ? `big:${st.size}:${st.mtimeMs}:${st.ino}` : fs.readFileSync(p));
     } catch { h.update("missing"); }
   }
   return h.digest("hex");
@@ -349,10 +370,11 @@ export function collectReviewContext(cwd, { base, scope = "auto", commit, pr }) 
         const st = fs.lstatSync(path.join(cwd, f));
         if (st.isSymbolicLink()) { extra += `\n### NEW SYMLINK ${f} -> ${fs.readlinkSync(path.join(cwd, f))}\n`; continue; }
         if (!st.isFile()) continue;
+        if (st.size > 100_000) { extra += `\n### NEW FILE ${f} (large, ${st.size} bytes; open it if relevant)\n`; continue; }
         body = fs.readFileSync(path.join(cwd, f));
       } catch { continue; }
-      extra += body.includes(0) || body.length > 100_000
-        ? `\n### NEW FILE ${f} (binary or large, ${body.length} bytes; open it if relevant)\n`
+      extra += body.includes(0)
+        ? `\n### NEW FILE ${f} (binary, ${body.length} bytes)\n`
         : `\n### NEW FILE ${f}\n${body.toString("utf8")}\n`;
     }
   } else if (scope === "branch") {
@@ -471,7 +493,8 @@ export function runJob(job) {
     if (fs.existsSync(cancelFile(job.id))) return finalizeCancelled(); // cancelled before agy even started
     const child = spawn(bin, job.agyArgs, { cwd: job.runCwd || job.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" }, detached: true });
     if (child.pid) trackGroup(child.pid);
-    Object.assign(job, { status: "running", agyPid: child.pid, startedAt: new Date().toISOString() });
+    Object.assign(job, { status: "running", agyPid: child.pid, agyStart: procStart(child.pid), startedAt: new Date().toISOString() });
+    if (job.pid === process.pid) job.pidStart = procStart(process.pid);
     saveJob(job);
     // agy may exit before reading the prompt (bad flag, auth failure); that must fail the job, not crash us.
     child.stdin.on("error", () => {});
@@ -907,10 +930,10 @@ async function cmdCancel(o, cwd) {
   if (job.status !== "running" && job.status !== "queued") return `Job \`${job.id}\` is already ${job.status}.`;
   fs.writeFileSync(cancelFile(job.id), ""); // the owner checks this before starting agy and when agy exits
   // A queued background job may not have a worker pid yet: give the worker time to claim it and see the marker.
-  const ownerGone = (j) => (j.pid ? !isAlive(j.pid) : Date.now() - Date.parse(j.createdAt) > 60_000);
+  const ownerGone = (j) => (j.pid ? !sameProcess(j.pid, j.pidStart) : Date.now() - Date.parse(j.createdAt) > 60_000);
   await waitUntil(() => { const j = loadJob(job.id); return !j || j.status !== "queued" || ownerGone(j); }, 10_000);
-  const agyPid = loadJob(job.id)?.agyPid;
-  if (agyPid && groupAlive(agyPid)) {
+  const { agyPid, agyStart } = loadJob(job.id) || {};
+  if (agyPid && sameProcess(agyPid, agyStart) && groupAlive(agyPid)) {
     signalGroup(agyPid, "SIGTERM");
     // Judge by the whole group, not the leader: a child that ignores TERM must still be killed.
     if (!(await waitUntil(() => !groupAlive(agyPid), 5000))) signalGroup(agyPid, "SIGKILL");
@@ -919,7 +942,6 @@ async function cmdCancel(o, cwd) {
   await waitUntil(finished, 10_000);
   const cur = loadJob(job.id);
   if (cur && (cur.status === "running" || cur.status === "queued")) {
-    if (cur.pid && isAlive(cur.pid) && cur.pid !== process.pid) signalGroup(cur.pid, "SIGKILL");
     Object.assign(cur, { status: "cancelled", finishedAt: new Date().toISOString() });
     if (cur.worktree) removeWorktree(cur.repoRoot, cur.worktree);
     cur.rendered = render(cur);
@@ -1073,11 +1095,11 @@ ALLOW: <short reason>
 BLOCK: <short reason>
 If BLOCK, follow with one bullet per defect: \`file:line\` — problem — fix.`;
 
+// The first line that starts with ALLOW:/BLOCK: decides, so a model that prefixes chatter is still understood.
 export function parseGate(text) {
-  const first = String(text || "").trim().split("\n", 1)[0].trim();
-  if (first.startsWith("ALLOW")) return { allow: true };
-  if (first.startsWith("BLOCK")) return { allow: false, reason: String(text).trim() };
-  return null;
+  const m = /^\s*\**(ALLOW|BLOCK)\**:/m.exec(String(text || ""));
+  if (!m) return null;
+  return m[1] === "ALLOW" ? { allow: true } : { allow: false, reason: String(text).slice(m.index).trim() };
 }
 
 async function hookStop(input) {

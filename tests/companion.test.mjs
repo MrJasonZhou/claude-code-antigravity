@@ -91,6 +91,8 @@ assert.doesNotMatch(t.body, /secret|meta/);
 assert.deepEqual(m.parseGate("ALLOW: fine"), { allow: true });
 assert.equal(m.parseGate("BLOCK: bug\n- a.py:1").allow, false);
 assert.equal(m.parseGate("hmm"), null);
+assert.deepEqual(m.parseGate("Here is my review:\n\nALLOW: fine"), { allow: true });
+assert.match(m.parseGate("Reviewed.\n**BLOCK**: bug in a.py").reason, /^\*\*BLOCK\*\*: bug/);
 
 // Stop hook: disabled -> silent; enabled -> fake agy BLOCKs once, same tree state is not re-reviewed.
 const gateAgy = path.join(tmp, "gate-agy");
@@ -122,7 +124,10 @@ fs.rmSync(path.join(repo, "big.bin"));
 
 // allowlist validation
 assert.equal(m.validateAllowCommand("  npm   test "), "npm test");
-assert.throws(() => m.validateAllowCommand("python3"), /too broad/);
+for (const bad of ["python3", "bash -c", "sh", "python3 -c", "node -e", "perl -E", "find . -name x", "env FOO=1", "sudo npm test", "/bin/bash -c", "npx", "git", "curl example.com", "deno eval"]) {
+  assert.throws(() => m.validateAllowCommand(bad), /arbitrary commands|metacharacters/, bad);
+}
+for (const ok of ["npm test", "pytest", "python3 -m unittest", "cargo test", "go test", "npx jest", "git status"]) assert.equal(m.validateAllowCommand(ok), ok);
 assert.throws(() => m.validateAllowCommand("npm test && rm -rf /"), /metacharacters/);
 assert.deepEqual(m.allowedCommands({ permissions: { allow: ["command(npm test)", "read_file(/x)", "command(*)"] } }), ["npm test"]);
 
@@ -307,5 +312,14 @@ const nl = fs.mkdtempSync(path.join(os.tmpdir(), "agy-nl-"));
 execFileSync("git", ["init", "-q"], { cwd: nl });
 fs.writeFileSync(path.join(nl, "foo\nbar.js"), "content-x\n");
 assert.match(m.collectReviewContext(nl, { scope: "working-tree" }).body, /content-x/);
+
+// a recorded pid that now belongs to an unrelated live process is not treated as the job's owner
+const fakeId = "task-zzzzzz-abcd";
+fs.writeFileSync(path.join(process.env.AGY_PLUGIN_DATA, "jobs", `${fakeId}.json`), JSON.stringify({
+  id: fakeId, kind: "task", cwd: wrepo, policy: "read", status: "running", createdAt: new Date().toISOString(),
+  title: "stale", pid: process.pid, pidStart: "not-the-real-start-time", agyArgs: [], prompt: "" }));
+if (fs.existsSync(`/proc/${process.pid}/stat`)) {
+  assert.match(execFileSync("node", [COMPANION, "status", fakeId], { cwd: wrepo, env: wenv, encoding: "utf8" }), /— failed/);
+}
 
 console.log("ok");
