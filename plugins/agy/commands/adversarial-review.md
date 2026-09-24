@@ -1,6 +1,6 @@
 ---
 description: Run an agy review that challenges the design, assumptions and failure modes of the current change
-argument-hint: "[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [focus text]"
+argument-hint: "[--wait|--background] [--base <ref>|--commit <sha>|--pr <number>] [--scope auto|working-tree|branch] [focus text]"
 allowed-tools: Bash(node:*), Bash(git:*), AskUserQuestion
 ---
 

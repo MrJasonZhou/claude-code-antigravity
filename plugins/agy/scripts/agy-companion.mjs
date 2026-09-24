@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // agy-companion: bridge between Claude Code and the Google Antigravity CLI (`agy`).
-// Subcommands: setup | task | review | research | image | status | result | cancel | resume-candidate
+// Subcommands: setup | task | review | research | image | compare | transfer | apply | status | result | cancel | resume-candidate
 // No dependencies beyond Node >= 18.
 
 import { spawn, spawnSync } from "node:child_process";
@@ -16,6 +16,8 @@ const PLUGIN_ROOT = path.resolve(path.dirname(SELF), "..");
 const DATA_DIR = process.env.AGY_PLUGIN_DATA || path.join(os.homedir(), ".cache", "agy-plugin");
 const JOBS_DIR = path.join(DATA_DIR, "jobs");
 const AGY_BRAIN = path.join(os.homedir(), ".gemini", "antigravity-cli", "brain");
+const AGY_SETTINGS = path.join(os.homedir(), ".gemini", "antigravity-cli", "settings.json");
+const MAX_JOBS = 200;
 const REVIEW_SCHEMA = path.join(PLUGIN_ROOT, "schemas", "review.schema.json");
 const MAX_DIFF_BYTES = 600_000; // Gemini has a long context; beyond this agy reads files itself.
 const EDIT_TOOLS = new Set(["write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file", "notebook_edit"]);
@@ -41,8 +43,8 @@ export function tokenize(str) {
   return out;
 }
 
-const BOOL = new Set(["write", "yolo", "background", "wait", "json", "resume-last", "fresh", "adversarial", "all", "keep", "enable-review-gate", "disable-review-gate"]);
-const VALUE = new Set(["model", "effort", "resume", "add-dir", "timeout", "base", "scope", "out", "agent", "source"]);
+const BOOL = new Set(["write", "yolo", "background", "wait", "json", "resume-last", "fresh", "adversarial", "all", "keep", "enable-review-gate", "disable-review-gate", "worktree"]);
+const VALUE = new Set(["model", "effort", "resume", "add-dir", "timeout", "base", "scope", "out", "agent", "source", "commit", "pr", "models", "allow-command", "revoke-command"]);
 
 export function parseArgs(tokens) {
   const opts = { "add-dir": [] }, rest = [];
@@ -145,10 +147,50 @@ function findJob(ref, cwd) {
 // ---------- prompts ----------
 
 const POLICY = {
-  read: "TOOL POLICY: READ-ONLY. Shell commands (run_command) and URL fetching (read_url_content) are NOT permitted in this run and any attempt aborts the whole run. Do not create or modify files. Use file viewing/search tools only.",
-  write: "TOOL POLICY: you MAY create and edit files inside the workspace using file-editing tools. Shell commands (run_command) and URL fetching (read_url_content) are NOT permitted in this run and any attempt aborts the whole run. Do not try to run tests or builds; instead list the exact commands Claude should run to verify your change.",
+  read: "TOOL POLICY: READ-ONLY. Do not create or modify files. Use file viewing/search tools only. URL fetching (read_url_content) is NOT permitted and any attempt aborts the whole run.",
+  write: "TOOL POLICY: you MAY create and edit files inside the workspace using file-editing tools. URL fetching (read_url_content) is NOT permitted and any attempt aborts the whole run.",
   yolo: "TOOL POLICY: full access, including shell commands and URL fetching. Stay inside the workspace. Never run destructive commands (rm -rf, git reset --hard, git push --force, dropping data) and do not commit or push.",
 };
+
+// ---------- agy command allowlist (persistent, in agy's own settings.json) ----------
+
+function readAgySettings() {
+  try { return JSON.parse(fs.readFileSync(AGY_SETTINGS, "utf8")); } catch { return {}; }
+}
+
+export function allowedCommands(settings = readAgySettings()) {
+  return (settings.permissions?.allow || []).map((r) => /^command\((.+)\)$/.exec(r)?.[1]).filter((c) => c && c !== "*");
+}
+
+// A rule like command(python3) would let agy run arbitrary code; require a specific subcommand.
+const TOO_BROAD = /^(\*|sh|bash|zsh|fish|env|sudo|su|rm|python3?|node|deno|bun|perl|ruby|php|curl|wget|git|npx|pnpx|bunx|eval|exec|xargs|find|docker|kubectl)$/;
+
+export function validateAllowCommand(cmd) {
+  const c = String(cmd || "").trim().replace(/\s+/g, " ");
+  if (!c) throw new Error("empty command");
+  if (/[;&|`$<>(){}\\\n]/.test(c)) throw new Error(`"${c}": shell metacharacters are not allowed in an allow rule`);
+  if (TOO_BROAD.test(c)) throw new Error(`"${c}" is too broad; allow a specific command such as "npm test" or "pytest"`);
+  return c;
+}
+
+function updateAllowlist(cmd, add) {
+  const settings = readAgySettings();
+  const rule = `command(${cmd})`;
+  const allow = (settings.permissions?.allow || []).filter((r) => r !== rule);
+  if (add) allow.push(rule);
+  settings.permissions = { ...settings.permissions, allow };
+  fs.mkdirSync(path.dirname(AGY_SETTINGS), { recursive: true });
+  fs.writeFileSync(AGY_SETTINGS, `${JSON.stringify(settings, null, 2)}\n`);
+}
+
+function policyText(policy) {
+  if (policy === "yolo") return POLICY.yolo;
+  const cmds = allowedCommands();
+  const shell = cmds.length
+    ? `Shell commands (run_command) are permitted ONLY when the whole command starts with one of these allowlisted prefixes: ${cmds.map((c) => `\`${c}\``).join(", ")}. Run them from the workspace root and do not chain other commands with && ; or |. ${policy === "write" ? "Use them to verify your change and iterate until they pass." : "Use them only for diagnosis."} Any other shell command aborts the whole run.`
+    : `Shell commands (run_command) are NOT permitted and any attempt aborts the whole run.${policy === "write" ? " Do not try to run tests or builds; list the exact commands Claude should run to verify your change." : ""}`;
+  return `${POLICY[policy]} ${shell}`;
+}
 
 function preamble(cwd, policy, extraDirs) {
   return [
@@ -156,7 +198,7 @@ function preamble(cwd, policy, extraDirs) {
     `WORKSPACE ROOT (absolute): ${cwd}`,
     extraDirs.length ? `ADDITIONAL DIRECTORIES: ${extraDirs.join(", ")}` : "",
     "Resolve every relative path against the workspace root. Do not browse outside it unless the task requires it, and never read shell history, environment variables, credentials or dotfiles in the home directory.",
-    POLICY[policy],
+    policyText(policy),
   ].filter(Boolean).join("\n");
 }
 
@@ -200,8 +242,13 @@ function defaultBase(cwd) {
   return null;
 }
 
-export function collectReviewContext(cwd, { base, scope = "auto" }) {
+export function collectReviewContext(cwd, { base, scope = "auto", commit, pr }) {
+  if (pr) return prContext(cwd, pr);
   git(cwd, ["rev-parse", "--is-inside-work-tree"]);
+  if (commit) {
+    const body = git(cwd, ["show", "--no-color", "--format=commit %H%nAuthor: %an%nDate: %ad%n%n%B", commit]);
+    return finishContext({ label: `commit ${commit}`, scope: "commit", body, stat: git(cwd, ["show", "--stat", "--format=", commit]) });
+  }
   const hasHead = (() => { try { git(cwd, ["rev-parse", "--verify", "HEAD"]); return true; } catch { return false; } })();
   const dirty = git(cwd, ["status", "--porcelain", "--untracked-files=all"]).trim();
   if (scope === "auto") scope = base ? "branch" : dirty ? "working-tree" : "branch";
@@ -227,15 +274,28 @@ export function collectReviewContext(cwd, { base, scope = "auto" }) {
   } else {
     throw new Error(`unknown --scope ${scope} (use auto|working-tree|branch)`);
   }
-  let body = diff + extra;
-  if (!body.trim()) return { empty: true, label };
-  let truncated = false;
-  if (Buffer.byteLength(body) > MAX_DIFF_BYTES) {
-    body = Buffer.from(body).subarray(0, MAX_DIFF_BYTES).toString("utf8");
-    truncated = true;
-  }
   const stat = scope === "branch" ? git(cwd, ["diff", "--stat", `${base}...HEAD`]) : hasHead ? git(cwd, ["diff", "--stat", "HEAD"]) : "";
-  return { empty: false, label, scope, body, stat, truncated };
+  return finishContext({ label, scope, body: diff + extra, stat });
+}
+
+function finishContext(ctx) {
+  if (!ctx.body.trim()) return { empty: true, label: ctx.label };
+  const truncated = Buffer.byteLength(ctx.body) > MAX_DIFF_BYTES;
+  const body = truncated ? Buffer.from(ctx.body).subarray(0, MAX_DIFF_BYTES).toString("utf8") : ctx.body;
+  return { ...ctx, empty: false, body, truncated };
+}
+
+// GitHub pull request via the gh CLI (uses the user's existing gh auth).
+function prContext(cwd, pr) {
+  const gh = (args) => {
+    const r = spawnSync("gh", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    if (r.error) throw new Error("reviewing a PR needs the GitHub CLI (gh) on PATH");
+    if (r.status !== 0) throw new Error(`gh ${args.join(" ")} failed: ${(r.stderr || "").trim()}`);
+    return r.stdout;
+  };
+  const meta = JSON.parse(gh(["pr", "view", pr, "--json", "number,title,body,baseRefName,headRefName,url"]));
+  const body = `### PR #${meta.number}: ${meta.title} (${meta.headRefName} -> ${meta.baseRefName})\n${meta.url}\n\n${meta.body || ""}\n\n### DIFF\n${gh(["pr", "diff", pr])}`;
+  return finishContext({ label: `pull request #${meta.number} (${meta.title})`, scope: "pr", body, stat: "" });
 }
 
 // ---------- run agy ----------
@@ -278,7 +338,7 @@ export function runJob(job) {
       saveJob(job);
       return resolve(job);
     }
-    const child = spawn(bin, job.agyArgs, { cwd: job.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" } });
+    const child = spawn(bin, job.agyArgs, { cwd: job.runCwd || job.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" } });
     Object.assign(job, { status: "running", agyPid: child.pid, startedAt: new Date().toISOString() });
     saveJob(job);
     child.stdin.end(job.prompt);
@@ -328,6 +388,7 @@ export function runJob(job) {
         job.status = "failed";
       }
       if (job.status === "failed" && !job.error) job.error = job.stderr || `agy exited with code ${code}`;
+      if (job.worktree) finalizeWorktree(job);
       job.artifacts = collectArtifacts(job);
       job.rendered = render(job);
       saveJob(job);
@@ -392,7 +453,11 @@ function render(job) {
   }
   if (r?.response) out.push((job.kind === "review" && renderReview(r.response)) || r.response.trim(), "");
   else if (job.status === "completed") out.push("_agy returned an empty response._", "");
-  if (job.touchedFiles?.length) out.push("## Files agy edited", ...job.touchedFiles.map((f) => `- ${f}`), "");
+  if (job.worktree) {
+    out.push(job.patch
+      ? `## Patch from isolated worktree (NOT applied yet)\n\n\`\`\`\n${job.patchStat}\n\`\`\`\n\nReview: \`git apply --stat ${job.patch}\` / read ${job.patch}\nApply: \`/agy:apply ${job.id}\``
+      : "_agy made no changes in its worktree._", "");
+  } else if (job.touchedFiles?.length) out.push("## Files agy edited", ...job.touchedFiles.map((f) => `- ${f}`), "");
   if (job.artifacts?.length) out.push("## agy artifacts", ...job.artifacts.map((f) => `- ${f}`), "");
   if (job.kind === "transfer" && job.conversationId) out.push(`Continue interactively in agy: \`agy --conversation ${job.conversationId}\` (run it from ${job.cwd}).`);
   if (job.conversationId && !["review", "gate"].includes(job.kind)) out.push(`_Follow up in the same agy conversation with \`/agy:task --resume-last <instructions>\`._`);
@@ -401,10 +466,12 @@ function render(job) {
 
 // ---------- subcommands ----------
 
+const jobId = (kind) => `${kind}-${Date.now().toString(36)}-${crypto.randomBytes(2).toString("hex")}`;
+
 function newJob(kind, cwd, o, policy, prompt, extra = {}) {
   const models = o.model ? listModels() : [];
   const job = {
-    id: `${kind}-${Date.now().toString(36)}-${crypto.randomBytes(2).toString("hex")}`,
+    id: jobId(kind),
     kind, cwd, policy, status: "queued", createdAt: new Date().toISOString(),
     title: short(o.text || extra.reviewLabel || kind, 70),
     model: resolveModel(o.model, models), agyArgs: buildAgyArgs(o, policy, models), prompt, ...extra,
@@ -416,6 +483,7 @@ function newJob(kind, cwd, o, policy, prompt, extra = {}) {
 }
 
 async function launch(job, o) {
+  pruneJobs();
   saveJob(job);
   if (o.background) {
     const child = spawn(process.execPath, [SELF, "_worker", job.id], { detached: true, stdio: "ignore", cwd: job.cwd });
@@ -436,12 +504,113 @@ function policyOf(o, fallback = "read") {
 
 async function cmdTask(o, cwd) {
   if (!o.text) throw new Error("task text is required");
-  const policy = policyOf(o);
+  const policy = policyOf(o, o.worktree ? "write" : "read");
   const tail = policy === "read" ? ASK_TAIL : TASK_TAIL;
+  const id = jobId("task");
+  const wt = o.worktree ? createWorktree(cwd, id) : null;
+  const root = wt ? wt.runCwd : cwd;
   const prompt = o.resume || o["resume-last"]
-    ? `${POLICY[policy]}\n\nFOLLOW-UP:\n${o.text}\n\n${tail}`
-    : `${preamble(cwd, policy, o["add-dir"])}\n\nTASK:\n${o.text}\n\n${tail}`;
-  return launch(newJob("task", cwd, o, policy, prompt), o);
+    ? `${policyText(policy)}${wt ? `\nYou are now working in an isolated git worktree: ${root}. Edit files there only.` : ""}\n\nFOLLOW-UP:\n${o.text}\n\n${tail}`
+    : `${preamble(root, policy, o["add-dir"])}\n\nTASK:\n${o.text}\n\n${tail}`;
+  return launch(newJob("task", cwd, o, policy, prompt, { id, ...wt }), o);
+}
+
+// ---------- isolated worktrees ----------
+
+// agy works on a throwaway worktree seeded with Claude's current uncommitted state, so parallel
+// agents never clobber each other; the result comes back as a patch applied with /agy:apply.
+function createWorktree(cwd, id) {
+  const root = git(cwd, ["rev-parse", "--show-toplevel"]).trim();
+  git(root, ["rev-parse", "--verify", "HEAD"]);
+  const worktree = path.join(DATA_DIR, "worktrees", id);
+  git(root, ["worktree", "add", "--detach", worktree, "HEAD"]);
+  const diff = spawnSync("git", ["diff", "HEAD", "--binary"], { cwd: root, maxBuffer: 256 * 1024 * 1024 }).stdout;
+  if (diff?.length) {
+    const r = spawnSync("git", ["apply", "--whitespace=nowarn"], { cwd: worktree, input: diff });
+    if (r.status !== 0) throw new Error(`could not replicate uncommitted changes into the worktree: ${r.stderr}`);
+  }
+  for (const f of git(root, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean)) {
+    fs.mkdirSync(path.dirname(path.join(worktree, f)), { recursive: true });
+    fs.copyFileSync(path.join(root, f), path.join(worktree, f));
+  }
+  git(worktree, ["add", "-A"]);
+  git(worktree, ["-c", "user.name=agy-plugin", "-c", "user.email=agy-plugin@localhost", "-c", "commit.gpgsign=false",
+    "commit", "--no-verify", "--allow-empty", "-q", "-m", "agy-plugin snapshot"]);
+  return { worktree, repoRoot: root, worktreeBase: git(worktree, ["rev-parse", "HEAD"]).trim(), runCwd: path.join(worktree, path.relative(root, cwd)) };
+}
+
+// Build/test by-products that should never ride along in a patch even when the repo does not ignore them.
+const JUNK = ["__pycache__", "*.pyc", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".DS_Store", ".coverage", "*.egg-info"];
+
+function finalizeWorktree(job) {
+  if (job.result?.response) job.result.response = job.result.response.split(job.runCwd).join(job.cwd).split(job.worktree).join(job.repoRoot);
+  try {
+    git(job.worktree, ["add", "-A", "--", ".", ...JUNK.map((p) => `:(exclude,glob)**/${p}`)]);
+    const patch = spawnSync("git", ["diff", "--cached", "--binary", job.worktreeBase], { cwd: job.worktree, maxBuffer: 256 * 1024 * 1024 }).stdout;
+    job.patchStat = git(job.worktree, ["diff", "--cached", "--stat", job.worktreeBase]).trim();
+    if (patch?.length) {
+      job.patch = path.join(JOBS_DIR, `${job.id}.patch`);
+      fs.writeFileSync(job.patch, patch);
+    }
+  } catch (e) {
+    job.error = `${job.error ? `${job.error}\n` : ""}collecting the worktree patch failed: ${e.message}`;
+  }
+  try { git(job.repoRoot, ["worktree", "remove", "--force", job.worktree]); } catch {}
+}
+
+function cmdApply(o, cwd) {
+  const job = o.text ? findJob(o.text, cwd) : listJobs(cwd).find((j) => j.patch && !j.applied);
+  if (!job) return o.text ? `No job ${o.text}.` : "No unapplied agy worktree patch in this workspace.";
+  if (!job.patch || !fs.existsSync(job.patch)) return `Job \`${job.id}\` has no patch (agy made no changes, or it was not a --worktree job).`;
+  if (job.applied) return `Patch from \`${job.id}\` was already applied.`;
+  const run = (args) => spawnSync("git", ["apply", ...args, job.patch], { cwd: job.repoRoot, encoding: "utf8" });
+  let r = run(["--check"]);
+  let how = "cleanly";
+  if (r.status !== 0) {
+    r = run(["--3way"]);
+    how = "with a 3-way merge";
+    if (r.status !== 0) return `Could not apply \`${job.id}\`:\n\`\`\`\n${(r.stderr || "").trim()}\n\`\`\`\nResolve conflicts manually, or inspect the patch at ${job.patch}.`;
+  } else {
+    r = run([]);
+    if (r.status !== 0) return `git apply failed: ${r.stderr}`;
+  }
+  job.applied = true;
+  saveJob(job);
+  return `Applied agy patch from \`${job.id}\` ${how}${/conflict/i.test(r.stderr || "") ? " (with conflicts — check `git status`)" : ""}:\n\`\`\`\n${job.patchStat}\n\`\`\``;
+}
+
+// ---------- multi-model comparison ----------
+
+async function cmdCompare(o, cwd) {
+  if (!o.text) throw new Error("question is required");
+  const all = listModels();
+  const models = [...new Set((o.models || "pro,opus,gpt").split(",").map((m) => resolveModel(m.trim(), all)).filter(Boolean))];
+  if (models.length < 2) throw new Error("--models needs at least two models, e.g. --models pro,opus");
+  const prompt = `${preamble(cwd, "read", o["add-dir"])}\n\nYou are one of several independent models answering the same question; give your own best, well-reasoned answer.\n\nQUESTION:\n${o.text}\n\n${ASK_TAIL}`;
+  pruneJobs();
+  const jobs = models.map((model) => {
+    const job = newJob("task", cwd, { ...o, model: null }, "read", prompt);
+    job.agyArgs.push("--model", model);
+    job.model = model;
+    job.title = short(`[compare ${model}] ${o.text}`, 70);
+    job.pid = process.pid;
+    saveJob(job);
+    return job;
+  });
+  const done = await Promise.all(jobs.map(runJob));
+  return [`# agy compare — ${done.length} models`, "", `Question: ${o.text}`, "",
+    ...done.map((j) => `## ${j.model} (${j.status}${j.result?.duration ? `, ${Math.round(j.result.duration)}s` : ""})\n\n${j.status === "completed" ? (j.result.response || "_empty response_").trim() : `Error: ${j.error}`}\n`)].join("\n");
+}
+
+function pruneJobs() {
+  let names = [];
+  try { names = fs.readdirSync(JOBS_DIR).filter((f) => f.endsWith(".json")); } catch { return; }
+  if (names.length <= MAX_JOBS) return;
+  const jobs = names.map((f) => loadJob(f.slice(0, -5))).filter((j) => j && j.status !== "running")
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  for (const j of jobs.slice(0, names.length - MAX_JOBS)) {
+    for (const ext of [".json", ".log", ".patch"]) fs.rmSync(path.join(JOBS_DIR, `${j.id}${ext}`), { force: true });
+  }
 }
 
 async function cmdResearch(o, cwd) {
@@ -458,7 +627,7 @@ async function cmdImage(o, cwd) {
 }
 
 async function cmdReview(o, cwd) {
-  const ctx = collectReviewContext(cwd, { base: o.base, scope: o.scope });
+  const ctx = collectReviewContext(cwd, { base: o.base, scope: o.scope, commit: o.commit, pr: o.pr });
   if (ctx.empty) return `Nothing to review: ${ctx.label} is empty.`;
   const prompt = `${preamble(cwd, "read", o["add-dir"])}\n\n${reviewInstructions(o.adversarial, o.text)}\n\nCHANGE UNDER REVIEW: ${ctx.label}\n${ctx.stat ? `\n### STAT\n${ctx.stat}` : ""}\n### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
   const job = newJob("review", cwd, { ...o, resume: null, "resume-last": false }, "read", prompt, { reviewLabel: ctx.label, truncated: ctx.truncated, adversarial: !!o.adversarial });
@@ -507,6 +676,7 @@ function cmdCancel(o, cwd) {
     try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch {} }
   }
   Object.assign(job, { status: "cancelled", finishedAt: new Date().toISOString() });
+  if (job.worktree) try { git(job.repoRoot, ["worktree", "remove", "--force", job.worktree]); } catch {}
   job.rendered = render(job);
   saveJob(job);
   return `Cancelled \`${job.id}\`.`;
@@ -519,6 +689,8 @@ function cmdResumeCandidate(o, cwd) {
 }
 
 function cmdSetup(o, cwd) {
+  if (o["allow-command"]) updateAllowlist(validateAllowCommand(o["allow-command"]), true);
+  if (o["revoke-command"]) updateAllowlist(String(o["revoke-command"]).trim().replace(/\s+/g, " "), false);
   if (o["enable-review-gate"] || o["disable-review-gate"]) {
     const cfg = loadConfig();
     cfg.reviewGate = cfg.reviewGate || {};
@@ -547,6 +719,8 @@ function cmdSetup(o, cwd) {
     if (report.error) lines.push("", "## Error", "```", report.error, "```");
   }
   lines.push("", `- stop-time review gate for ${cwd}: ${loadConfig().reviewGate?.[cwd] ? "ENABLED" : "disabled"} (toggle with --enable-review-gate / --disable-review-gate)`);
+  const cmds = allowedCommands();
+  lines.push("", `- commands agy may run in every mode (from ${AGY_SETTINGS}): ${cmds.length ? cmds.map((c) => `\`${c}\``).join(", ") : "none"} (add with --allow-command "<cmd>", remove with --revoke-command "<cmd>")`);
   lines.push("", `Job data: ${DATA_DIR}`);
   return lines.join("\n");
 }
@@ -708,7 +882,7 @@ function saveGateState(key, state) {
   saveConfig(cfg);
 }
 
-const COMMANDS = { task: cmdTask, review: cmdReview, research: cmdResearch, image: cmdImage, status: cmdStatus, result: cmdResult, cancel: cmdCancel, setup: cmdSetup, transfer: cmdTransfer, "resume-candidate": cmdResumeCandidate };
+const COMMANDS = { task: cmdTask, review: cmdReview, research: cmdResearch, image: cmdImage, status: cmdStatus, result: cmdResult, cancel: cmdCancel, setup: cmdSetup, transfer: cmdTransfer, apply: cmdApply, compare: cmdCompare, "resume-candidate": cmdResumeCandidate };
 
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);

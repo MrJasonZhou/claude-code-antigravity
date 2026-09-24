@@ -11,7 +11,10 @@ Helper: `node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" <subcommand> "<a
 | subcommand | purpose |
 |---|---|
 | `task` | delegate coding work / questions about the workspace |
-| `review` | structured code review of working tree or branch (`--base`, `--scope`, `--adversarial`, focus text) |
+| `review` | structured code review of working tree, branch (`--base`), one commit (`--commit`), or a GitHub PR (`--pr`); `--adversarial`, focus text |
+| `compare` | same read-only question to several models in parallel (`--models pro,opus,gpt`) |
+| `apply [id]` | apply the patch from a `--worktree` task |
+| `transfer` | hand the current Claude session to agy |
 | `research` | Google-Search-backed answer with source URLs |
 | `image` | generate images, copied to `agy-images/` or `--out` |
 | `status [id] [--all]`, `result [id]`, `cancel [id]` | background job management |
@@ -19,7 +22,8 @@ Helper: `node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" <subcommand> "<a
 | `setup` | install / auth / quota / model check |
 
 Flags shared by task, review, research, image:
-- Policy: default read-only · `--write` file edits (agy `--mode accept-edits`) · `--yolo` shell + URLs (agy `--dangerously-skip-permissions`, explicit user opt-in only).
+- Policy: default read-only · `--write` file edits (agy `--mode accept-edits`) · `--worktree` file edits in an isolated git worktree, returned as a patch · `--yolo` shell + URLs (agy `--dangerously-skip-permissions`, explicit user opt-in only).
+- Commands allowlisted via `setup --allow-command "<cmd>"` (stored in agy's settings.json) can run in every policy; agy is told exactly which ones, so it can run tests and iterate.
 - `--background` detaches and returns a job id. `--model <id|pro|flash|opus|sonnet|gpt>` (aliases resolve to the newest matching model). `--effort low|medium|high`. `--add-dir <dir>` (repeatable). `--timeout <seconds>`. `--agent <name>` selects a custom agy agent. `--json` prints the raw job record.
 - `--resume-last` continues the last agy conversation in this workspace; `--resume <conversation-id>` continues a specific one.
 
@@ -28,6 +32,8 @@ Why the policies matter: agy's headless mode cannot ask for permission, so a too
 Presenting results:
 - Output is Markdown; show it verbatim. Keep file paths, line numbers, source URLs, job ids and the follow-up hint.
 - Reviews: findings are already sorted by severity. After showing them, stop and ask which to fix. Never auto-apply review fixes.
+- Worktree patches: show the stat and ask before running `/agy:apply`.
+- Compare: show each model's answer, then synthesize agreements/disagreements.
 - Edits: when "Files agy edited" is present, say so, then verify (diff, tests) before calling the work done.
 - Failures: show the error block and stop. Do not quietly redo agy's task yourself unless the user asks.
 - Setup/auth problems: direct the user to `/agy:setup`.

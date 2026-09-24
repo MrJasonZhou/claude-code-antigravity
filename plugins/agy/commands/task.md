@@ -1,6 +1,6 @@
 ---
 description: Delegate a coding task (implementation, fix, investigation) to Google Antigravity (agy)
-argument-hint: "[--write|--yolo] [--background|--wait] [--resume|--fresh] [--model <id|pro|flash|opus|sonnet>] [--effort low|medium|high] [--add-dir <dir>] <what agy should do>"
+argument-hint: "[--write|--worktree|--yolo] [--background|--wait] [--resume|--fresh] [--model <id|pro|flash|opus|sonnet>] [--effort low|medium|high] [--add-dir <dir>] <what agy should do>"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
@@ -12,7 +12,9 @@ $ARGUMENTS
 Permission policy (pass through exactly what the user chose):
 - no flag → read-only: agy may read files but not edit or run shell commands. Good for investigation, diagnosis, planning.
 - `--write` → agy may create and edit files in the workspace (no shell commands).
-- `--yolo` → agy may also run shell commands and fetch URLs. Only pass it when the user explicitly asked for it.
+- `--worktree` → agy edits an isolated git worktree seeded with the current uncommitted state; the result is a patch the user applies with `/agy:apply`. Prefer it when Claude is also editing, for parallel attempts, or for risky changes.
+- `--yolo` → agy may also run arbitrary shell commands and fetch URLs. Only pass it when the user explicitly asked for it.
+- Commands allowlisted with `/agy:setup --allow-command "<cmd>"` (e.g. the test command) are usable in every mode, so agy can run tests and iterate.
 - If the user clearly asks agy to implement/fix/change something but gave no policy flag, add `--write`.
 
 Resume handling:
@@ -20,8 +22,9 @@ Resume handling:
 - Otherwise run `node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" resume-candidate` first. If it returns `"available": true` AND the request reads like a follow-up ("continue", "keep going", "now also…", "apply the fix"), use `AskUserQuestion` once with the options `Continue current agy conversation (Recommended)` and `Start a new agy conversation`; add `--resume-last` if the user continues. If it is not a follow-up, do not ask.
 
 Execution mode:
-- `--background` → keep the flag; the companion detaches and returns a job id immediately.
-- `--wait` or no flag → foreground. For large, open-ended or multi-step requests without an explicit flag, prefer adding `--background`.
+- `--background` → strip it and run the same command with `Bash(..., run_in_background: true)`. Claude Code notifies you with agy's full output when it finishes; meanwhile tell the user agy is working and that `/agy:status` shows live progress. Do not poll.
+- `--wait` → strip it and run in the foreground (`timeout: 600000`).
+- Neither → foreground for small, bounded requests; background for large, open-ended or multi-step ones.
 
 Run exactly one Bash call (foreground calls need `timeout: 600000`):
 ```bash
@@ -31,6 +34,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" task "<flags> <task text>
 
 After it returns:
 - Present the companion output to the user verbatim (it is already Markdown).
+- If agy produced a worktree patch, show the stat and ask whether to `/agy:apply` it — do not apply it yourself unprompted.
 - If agy edited files, say so and list them; then verify the change yourself (read the diff, run the verification commands it suggested) before claiming success.
 - If agy failed or was blocked by the permission policy, report that and stop; do not silently redo the task yourself.
 - If `agy` is missing or unauthenticated, tell the user to run `/agy:setup`.

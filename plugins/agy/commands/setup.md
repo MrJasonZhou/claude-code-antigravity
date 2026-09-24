@@ -1,6 +1,6 @@
 ---
 description: Check that the agy CLI is installed and signed in, show quota and models, and optionally toggle the stop-time review gate
-argument-hint: "[--enable-review-gate|--disable-review-gate]"
+argument-hint: "[--enable-review-gate|--disable-review-gate] [--allow-command \"<cmd>\"] [--revoke-command \"<cmd>\"]"
 allowed-tools: Bash(node:*)
 ---
 

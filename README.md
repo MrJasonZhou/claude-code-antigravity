@@ -17,8 +17,10 @@ Requirements: Node ≥ 18, and `agy` on `PATH` (or set `AGY_BIN`). You must have
 |---|---|
 | `/agy:task <task>` | Delegate work: implement, fix, investigate. Offers to continue the previous agy conversation for follow-ups. |
 | `/agy:ask <question>` | Read-only questions about the whole codebase, or a second opinion. |
-| `/agy:review` | Structured code review of uncommitted changes or a branch (`--base`, `--scope`, focus text). Findings are sorted by severity and include file:line. |
+| `/agy:review` | Structured code review. Targets: uncommitted changes, a branch (`--base`), one commit (`--commit <sha>`), or a GitHub PR (`--pr <n>`, uses `gh`). Findings are sorted by severity and include file:line. |
 | `/agy:adversarial-review` | Review that challenges the design, its assumptions and how it fails in real use. |
+| `/agy:compare <question>` | Ask several models the same question in parallel (default `pro,opus,gpt`, i.e. Gemini, Claude and GPT through agy). Claude then summarizes where they agree and disagree. |
+| `/agy:apply [id]` | Apply the patch from a `--worktree` task. Falls back to a 3-way merge when needed. |
 | `/agy:research <question>` | Answer from live Google Search, with source URLs. |
 | `/agy:image <description>` | Generate images. Files are saved to `agy-images/`, or to the directory given by `--out`. |
 | `/agy:status [id]`, `/agy:result [id]`, `/agy:cancel [id]` | Manage background jobs. |
@@ -40,8 +42,10 @@ Claude can also call the **`agy-delegate`** subagent on its own. It does this fo
 - **Permission policy.** agy's headless mode cannot ask you for approval. Any tool outside the chosen policy stops the run, and the output tells you so.
   - *(default)* read-only: agy can read files but cannot edit them or run shell commands.
   - `--write`: agy can edit files in the workspace (`agy --mode accept-edits`).
+  - `--worktree`: agy edits a throwaway git worktree seeded with your current uncommitted and untracked files. The result comes back as a patch you apply with `/agy:apply`. Your own working tree is never touched, so several agy tasks and Claude can work at the same time.
   - `--yolo`: agy can also run shell commands and fetch URLs (`agy --dangerously-skip-permissions`). Only use this when you ask for it explicitly.
-- `--background` runs the job detached. Follow it with `/agy:status` and `/agy:result`.
+- **Letting agy run tests.** Use `/agy:setup --allow-command "npm test"`. The rule is stored in agy's own `settings.json` and can be removed with `--revoke-command`. agy is told exactly which commands it may run, so it can run the tests and iterate until they pass, without `--yolo`. Rules that are too broad (`python3`, `bash`, `git`, …) and shell metacharacters are refused.
+- `--background` runs the job in the background. From slash commands, it runs as a Claude background task, so Claude is notified when agy finishes. Follow it with `/agy:status` and `/agy:result`.
 - `--resume-last` continues the last completed agy conversation in this workspace. `--resume <conversation-id>` continues a specific one.
 - `--model <id|pro|flash|opus|sonnet|gpt>` picks a model. An alias resolves to the newest matching model and prefers the `-high` variant.
 - `--effort low|medium|high`, `--add-dir <dir>`, `--timeout <sec>`, `--agent <custom agy agent>`, `--json`.

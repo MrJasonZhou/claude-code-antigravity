@@ -9,7 +9,7 @@ agy has built-in Google Search, which makes it good at current facts: latest lib
 Raw request:
 $ARGUMENTS
 
-Run one Bash call (foreground needs `timeout: 600000`):
+If the request includes `--background`, strip it and run the command with `Bash(..., run_in_background: true)` (you are notified with the output when agy finishes; tell the user `/agy:status` shows progress). Otherwise run one foreground Bash call with `timeout: 600000`:
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" research "$ARGUMENTS"
 ```

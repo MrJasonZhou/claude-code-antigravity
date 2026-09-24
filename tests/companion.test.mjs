@@ -106,4 +106,55 @@ assert.match(blocked.reason, /off by one/);
 assert.equal(stop(), ""); // unchanged tree: not reviewed again
 assert.equal(fs.readFileSync(path.join(tmp, "gate-calls"), "utf8"), "x");
 
+// allowlist validation
+assert.equal(m.validateAllowCommand("  npm   test "), "npm test");
+assert.throws(() => m.validateAllowCommand("python3"), /too broad/);
+assert.throws(() => m.validateAllowCommand("npm test && rm -rf /"), /metacharacters/);
+assert.deepEqual(m.allowedCommands({ permissions: { allow: ["command(npm test)", "read_file(/x)", "command(*)"] } }), ["npm test"]);
+
+// --worktree: agy edits an isolated copy seeded with uncommitted + untracked state; /agy:apply brings the patch back.
+const wrepo = fs.mkdtempSync(path.join(os.tmpdir(), "agy-wt-"));
+const g = (...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd: wrepo, encoding: "utf8" });
+g("init", "-q");
+fs.writeFileSync(path.join(wrepo, "a.txt"), "one\n");
+g("add", "."); g("commit", "-qm", "init");
+fs.writeFileSync(path.join(wrepo, "a.txt"), "one\ntwo\n");       // uncommitted edit
+fs.writeFileSync(path.join(wrepo, "u.txt"), "untracked\n");      // untracked file
+const editAgy = path.join(tmp, "edit-agy");
+fs.writeFileSync(editAgy, `#!/usr/bin/env node
+const fs = require("fs");
+if (process.argv[2] === "models") { console.log("gemini-x-pro-high\\tPro\\nclaude-opus-x\\tOpus"); process.exit(0); }
+let input = ""; process.stdin.on("data", d => input += d); process.stdin.on("end", () => {
+  if (input.includes("independent models")) {
+    const m = process.argv[process.argv.indexOf("--model") + 1];
+    console.log(JSON.stringify({event:"result",result:{conversation_id:"cmp",status:"SUCCESS",response:"answer from " + m}}));
+    return;
+  }
+  // seeded state must be visible inside the worktree
+  if (fs.readFileSync("a.txt","utf8") !== "one\\ntwo\\n" || !fs.existsSync("u.txt")) process.exit(7);
+  fs.appendFileSync("a.txt", "three\\n");
+  fs.mkdirSync("__pycache__", { recursive: true }); fs.writeFileSync("__pycache__/a.pyc", "junk");
+  console.log(JSON.stringify({event:"result",result:{conversation_id:"w",status:"SUCCESS",response:"edited"}}));
+});
+`, { mode: 0o755 });
+const wenv = { ...process.env, AGY_BIN: editAgy };
+const wout = execFileSync("node", [COMPANION, "task", "--worktree add a line"], { cwd: wrepo, env: wenv, encoding: "utf8" });
+assert.match(wout, /Patch from isolated worktree \(NOT applied yet\)/);
+assert.doesNotMatch(wout, /pycache/); // test by-products never ride along
+assert.equal(fs.readFileSync(path.join(wrepo, "a.txt"), "utf8"), "one\ntwo\n"); // main tree untouched
+assert.match(execFileSync("node", [COMPANION, "apply"], { cwd: wrepo, env: wenv, encoding: "utf8" }), /Applied agy patch/);
+assert.equal(fs.readFileSync(path.join(wrepo, "a.txt"), "utf8"), "one\ntwo\nthree\n");
+assert.match(execFileSync("node", [COMPANION, "apply"], { cwd: wrepo, env: wenv, encoding: "utf8" }), /No unapplied/);
+assert.equal(g("worktree", "list").trim().split("\n").length, 1); // throwaway worktree removed
+
+// compare: same question to several models in parallel
+const cmp = execFileSync("node", [COMPANION, "compare", "--models pro,opus which is better?"], { cwd: wrepo, env: wenv, encoding: "utf8" });
+assert.match(cmp, /## gemini-x-pro-high[\s\S]*answer from gemini-x-pro-high/);
+assert.match(cmp, /## claude-opus-x[\s\S]*answer from claude-opus-x/);
+
+// review --commit builds context from a single commit
+const cctx = m.collectReviewContext(wrepo, { commit: "HEAD" });
+assert.equal(cctx.scope, "commit");
+assert.match(cctx.body, /\+one/);
+
 console.log("ok");
