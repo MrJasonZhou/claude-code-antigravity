@@ -1,0 +1,7 @@
+{
+  "name": "agy",
+  "version": "0.1.0",
+  "description": "Delegate tasks, code reviews, web research and image generation to Google Antigravity (agy / Gemini) from Claude Code.",
+  "author": { "name": "rocky" },
+  "keywords": ["antigravity", "agy", "gemini", "delegation", "review", "research"]
+}

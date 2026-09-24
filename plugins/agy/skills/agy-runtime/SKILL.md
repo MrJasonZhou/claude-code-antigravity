@@ -1,0 +1,33 @@
+---
+name: agy-runtime
+description: Contract for calling the agy companion runtime and presenting agy results back to the user (used by the agy-delegate subagent and /agy commands)
+user-invocable: false
+---
+
+# agy runtime
+
+Helper: `node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" <subcommand> "<args>"`
+
+| subcommand | purpose |
+|---|---|
+| `task` | delegate coding work / questions about the workspace |
+| `review` | structured code review of working tree or branch (`--base`, `--scope`, `--adversarial`, focus text) |
+| `research` | Google-Search-backed answer with source URLs |
+| `image` | generate images, copied to `agy-images/` or `--out` |
+| `status [id] [--all]`, `result [id]`, `cancel [id]` | background job management |
+| `resume-candidate` | JSON: is there an agy conversation in this workspace to continue? |
+| `setup` | install / auth / quota / model check |
+
+Flags shared by task, review, research, image:
+- Policy: default read-only · `--write` file edits (agy `--mode accept-edits`) · `--yolo` shell + URLs (agy `--dangerously-skip-permissions`, explicit user opt-in only).
+- `--background` detaches and returns a job id. `--model <id|pro|flash|opus|sonnet|gpt>` (aliases resolve to the newest matching model). `--effort low|medium|high`. `--add-dir <dir>` (repeatable). `--timeout <seconds>`. `--agent <name>` selects a custom agy agent. `--json` prints the raw job record.
+- `--resume-last` continues the last agy conversation in this workspace; `--resume <conversation-id>` continues a specific one.
+
+Why the policies matter: agy's headless mode cannot ask for permission, so a tool outside the policy aborts the run. The output then contains a "stopped because it tried a tool…" note; suggest re-running with `--write` or `--yolo` instead of working around it.
+
+Presenting results:
+- Output is Markdown; show it verbatim. Keep file paths, line numbers, source URLs, job ids and the follow-up hint.
+- Reviews: findings are already sorted by severity. After showing them, stop and ask which to fix. Never auto-apply review fixes.
+- Edits: when "Files agy edited" is present, say so, then verify (diff, tests) before calling the work done.
+- Failures: show the error block and stop. Do not quietly redo agy's task yourself unless the user asks.
+- Setup/auth problems: direct the user to `/agy:setup`.
