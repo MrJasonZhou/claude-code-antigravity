@@ -240,15 +240,16 @@ const NEVER = /^(\*|sh|bash|zsh|fish|dash|ksh|csh|tcsh|pwsh|powershell|cmd|busyb
 const OPEN_ENDED_TOOL = /^(python[0-9.]*|node|deno|bun|perl|ruby|php|lua|npx|pnpx|bunx|npm|pnpm|yarn|uv|pipx|poetry|pdm|hatch|cargo|go|dotnet|gradle|mvn|git|docker|podman|kubectl|make|awk|gawk|sed)$/;
 const INLINE_CODE = /^(-c|-e|-E|-p|-r|-x|--eval|--print|eval)$/;
 const LAUNCHER_SUB = /^(exec|x|dlx|run|task|tool|tools|create)$/;
-// Global options that take a separate value (npm --prefix frontend, git -C sub): the value is not a subcommand.
-const VALUE_OPT = /^(--prefix|--dir|--cwd|-C|--filter|-F|--workspace|-w|--manifest-path|--project|--directory|--file|-f|--config)$/;
+// Any option without "=" may take the next token as its value (npm --prefix frontend, npm --loglevel error),
+// so that token is never counted as a subcommand. Structural on purpose: no list of value-taking options to keep up.
+// Exception: "-m <module>" (python3 -m unittest) names exactly what runs, so the module is the subcommand.
+const SELECTS = (opt) => opt === "-m";
 
-// Positional (non-option) tokens, skipping the value that follows a value-taking option.
 function positionals(args) {
   const out = [];
   for (let i = 0; i < args.length; i++) {
-    if (!args[i].startsWith("-")) out.push(args[i]);
-    else if (!args[i].includes("=") && VALUE_OPT.test(args[i])) i++;
+    if (!args[i].startsWith("-") || SELECTS(args[i - 1])) out.push(args[i]);
+    else if (!args[i].includes("=") && !SELECTS(args[i])) i++;
   }
   return out;
 }
@@ -262,11 +263,12 @@ export function validateAllowCommand(cmd) {
   // For interpreters, any inline-code flag (python -u -c) or a trailing option whose value would be free
   // (python3 -m, node --require) makes the prefix open-ended.
   const last = args[args.length - 1] || "";
-  const endsOnOptionValue = args.length >= 2 && VALUE_OPT.test(args[args.length - 2]) && !args[args.length - 2].includes("=");
+  const prev = args[args.length - 2] || "";
+  const endsOnOptionValue = prev.startsWith("-") && !prev.includes("=") && !SELECTS(prev);
   const openEnded = !positionals(args).length || endsOnOptionValue || args.some((t) => INLINE_CODE.test(t))
     || last.startsWith("-") || LAUNCHER_SUB.test(last);
   if (NEVER.test(tool) || (OPEN_ENDED_TOOL.test(tool) && openEnded)) {
-    throw new Error(`"${c}" would let agy run arbitrary commands; allow a specific command such as "npm test", "pytest" or "python3 -m unittest"`);
+    throw new Error(`"${c}" would let agy run arbitrary commands; allow a specific command that ends in a subcommand, such as "npm test", "npm --prefix web test", "pytest" or "python3 -m unittest" (drop trailing flags: agy may append arguments itself)`);
   }
   return c;
 }
