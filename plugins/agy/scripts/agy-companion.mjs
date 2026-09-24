@@ -365,7 +365,11 @@ function defaultBase(cwd) {
 // Everything is collected from the repository root: diff paths are root-relative, and untracked files
 // outside the current subdirectory must not be missed.
 export function collectReviewContext(cwd, { base, scope = "auto", commit, pr }) {
-  if (pr) return prContext(cwd, pr);
+  if (pr) {
+    let root = cwd; // PR diffs are root-relative too; outside a checkout gh resolves the repo itself
+    try { root = git(cwd, ["rev-parse", "--show-toplevel"]).trim(); } catch {}
+    return prContext(root, pr);
+  }
   cwd = git(cwd, ["rev-parse", "--show-toplevel"]).trim();
   if (commit) {
     const body = git(cwd, ["show", "--no-color", "--format=commit %H%nAuthor: %an%nDate: %ad%n%n%B", commit]);
@@ -424,7 +428,7 @@ function prContext(cwd, pr) {
   };
   const meta = JSON.parse(gh(["pr", "view", pr, "--json", "number,title,body,baseRefName,headRefName,url"]));
   const body = `### PR #${meta.number}: ${meta.title} (${meta.headRefName} -> ${meta.baseRefName})\n${meta.url}\n\n${meta.body || ""}\n\n### DIFF\n${gh(["pr", "diff", pr])}`;
-  return finishContext({ label: `pull request #${meta.number} (${meta.title})`, scope: "pr", body, stat: "" });
+  return finishContext({ label: `pull request #${meta.number} (${meta.title})`, scope: "pr", body, stat: "", root: cwd });
 }
 
 // ---------- process groups ----------

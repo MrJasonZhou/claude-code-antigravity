@@ -340,5 +340,13 @@ fs.writeFileSync(path.join(wrepo, "x.txt"), "x\n");
 execFileSync("node", [COMPANION, "review", "--scope", "working-tree"], { cwd: sub, env: { ...process.env, AGY_BIN: path.join(tmp, "pwd-agy") } });
 assert.equal(fs.readFileSync(pwdFile, "utf8").trim(), fs.realpathSync(wrepo));
 fs.rmSync(path.join(wrepo, "x.txt"));
+// --pr from a subdirectory is also rooted at the repository (fake gh on PATH)
+const ghDir = path.join(tmp, "ghbin");
+fs.mkdirSync(ghDir, { recursive: true });
+fs.writeFileSync(path.join(ghDir, "gh"), `#!/bin/sh
+if [ "$2" = "view" ]; then echo '{"number":7,"title":"t","body":"","baseRefName":"main","headRefName":"f","url":"u"}'; else echo "diff --git a/backend/s.js b/backend/s.js"; fi
+`, { mode: 0o755 });
+const prCtx = execFileSync("node", ["-e", `import(${JSON.stringify(COMPANION)}).then(m => console.log(m.collectReviewContext(${JSON.stringify(sub)}, { pr: "7" }).root))`], { env: { ...process.env, PATH: `${ghDir}:${process.env.PATH}` }, encoding: "utf8" });
+assert.equal(prCtx.trim(), fs.realpathSync(wrepo));
 
 console.log("ok");
