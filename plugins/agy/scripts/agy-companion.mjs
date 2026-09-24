@@ -239,7 +239,7 @@ export function allowedCommands(settings = readAgySettings()) {
 const NEVER = /^(\*|sh|bash|zsh|fish|dash|ksh|csh|tcsh|pwsh|powershell|cmd|busybox|toybox|env|sudo|su|doas|nohup|timeout|nice|ionice|chrt|taskset|time|stdbuf|setsid|script|watch|chroot|unshare|flock|strace|ltrace|gdb|parallel|expect|osascript|eval|exec|source|xargs|find|rm|dd|curl|wget|nc|ncat|ssh|scp|uvx)$/;
 const OPEN_ENDED_TOOL = /^(python[0-9.]*|node|deno|bun|perl|ruby|php|lua|npx|pnpx|bunx|npm|pnpm|yarn|uv|pipx|poetry|pdm|hatch|cargo|go|dotnet|gradle|mvn|git|docker|podman|kubectl|make|awk|gawk|sed)$/;
 const INLINE_CODE = /^(-c|-e|-E|-p|-r|-x|--eval|--print|eval)$/;
-const LAUNCHER_SUB = /^(exec|x|dlx|run|tool|tools|create)$/;
+const LAUNCHER_SUB = /^(exec|x|dlx|run|task|tool|tools|create)$/;
 // Global options that take a separate value (npm --prefix frontend, git -C sub): the value is not a subcommand.
 const VALUE_OPT = /^(--prefix|--dir|--cwd|-C|--filter|-F|--workspace|-w|--manifest-path|--project|--directory|--file|-f|--config)$/;
 
