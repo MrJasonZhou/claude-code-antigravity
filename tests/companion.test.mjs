@@ -131,7 +131,8 @@ let input = ""; process.stdin.on("data", d => input += d); process.stdin.on("end
     return;
   }
   // seeded state must be visible inside the worktree
-  if (fs.readFileSync("a.txt","utf8") !== "one\\ntwo\\n" || !fs.existsSync("u.txt")) process.exit(7);
+  if (!fs.readFileSync("a.txt","utf8").startsWith("one\\ntwo\\n") || !fs.existsSync("u.txt")) process.exit(7);
+  if (input.includes("PROMPTFILE-MARKER")) { console.log(JSON.stringify({event:"result",result:{conversation_id:"pf",status:"SUCCESS",response:"saw marker"}})); return; }
   fs.appendFileSync("a.txt", "three\\n");
   fs.mkdirSync("__pycache__", { recursive: true }); fs.writeFileSync("__pycache__/a.pyc", "junk");
   console.log(JSON.stringify({event:"result",result:{conversation_id:"w",status:"SUCCESS",response:"edited"}}));
@@ -152,9 +153,30 @@ const cmp = execFileSync("node", [COMPANION, "compare", "--models pro,opus which
 assert.match(cmp, /## gemini-x-pro-high[\s\S]*answer from gemini-x-pro-high/);
 assert.match(cmp, /## claude-opus-x[\s\S]*answer from claude-opus-x/);
 
+// best-of-N: one isolated attempt per model, each with its own patch
+const att = execFileSync("node", [COMPANION, "task", "--worktree --models pro,opus add a line"], { cwd: wrepo, env: wenv, encoding: "utf8" });
+assert.equal((att.match(/apply with `\/agy:apply task-/g) || []).length, 2);
+assert.equal(g("worktree", "list").trim().split("\n").length, 1);
+
+// --prompt-file appends large context without going through argv
+fs.writeFileSync(path.join(tmp, "ctx.txt"), "PROMPTFILE-MARKER");
+assert.match(execFileSync("node", [COMPANION, "task", "--prompt-file", path.join(tmp, "ctx.txt"), "look at this log"], { cwd: wrepo, env: wenv, encoding: "utf8" }), /saw marker/);
+
+// result --wait blocks on a detached background job until it finishes
+const bg = execFileSync("node", [COMPANION, "task", "--background", "--prompt-file", path.join(tmp, "ctx.txt"), "bg"], { cwd: wrepo, env: wenv, encoding: "utf8" });
+const bgId = /`(task-[^`]+)`/.exec(bg)[1];
+assert.match(execFileSync("node", [COMPANION, "result", bgId, "--wait", "--timeout", "30"], { cwd: wrepo, env: wenv, encoding: "utf8" }), /saw marker/);
+
+// agy exiting before reading its prompt (EPIPE) fails the job instead of crashing the companion
+const big = path.join(tmp, "big.txt");
+fs.writeFileSync(big, "x".repeat(2_000_000));
+assert.match(execFileSync("node", [COMPANION, "task", "--prompt-file", big, "q"], { cwd: wrepo, env: { ...process.env, AGY_BIN: "/bin/false" }, encoding: "utf8" }), /# agy task — failed/);
+
 // review --commit builds context from a single commit
 const cctx = m.collectReviewContext(wrepo, { commit: "HEAD" });
 assert.equal(cctx.scope, "commit");
 assert.match(cctx.body, /\+one/);
+
+assert.equal(m.demote("## R\n```sh\n# keep\n```\n# H"), "#### R\n```sh\n# keep\n```\n### H");
 
 console.log("ok");

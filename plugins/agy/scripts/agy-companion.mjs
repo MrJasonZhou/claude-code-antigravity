@@ -44,7 +44,7 @@ export function tokenize(str) {
 }
 
 const BOOL = new Set(["write", "yolo", "background", "wait", "json", "resume-last", "fresh", "adversarial", "all", "keep", "enable-review-gate", "disable-review-gate", "worktree"]);
-const VALUE = new Set(["model", "effort", "resume", "add-dir", "timeout", "base", "scope", "out", "agent", "source", "commit", "pr", "models", "allow-command", "revoke-command"]);
+const VALUE = new Set(["model", "effort", "resume", "add-dir", "timeout", "base", "scope", "out", "agent", "source", "commit", "pr", "models", "allow-command", "revoke-command", "prompt-file"]);
 
 export function parseArgs(tokens) {
   const opts = { "add-dir": [] }, rest = [];
@@ -341,11 +341,14 @@ export function runJob(job) {
     const child = spawn(bin, job.agyArgs, { cwd: job.runCwd || job.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" } });
     Object.assign(job, { status: "running", agyPid: child.pid, startedAt: new Date().toISOString() });
     saveJob(job);
+    // agy may exit before reading the prompt (bad flag, auth failure); that must fail the job, not crash us.
+    child.stdin.on("error", () => {});
     child.stdin.end(job.prompt);
 
     const log = fs.createWriteStream(logFile(job.id), { flags: "a" });
     const touched = new Set();
     let buf = "", stderr = "", result = null, lastSave = 0;
+    child.on("error", (e) => { stderr += `failed to start agy: ${e.message}\n`; });
 
     const onLine = (line) => {
       if (!line.trim()) return;
@@ -504,6 +507,7 @@ function policyOf(o, fallback = "read") {
 
 async function cmdTask(o, cwd) {
   if (!o.text) throw new Error("task text is required");
+  if (o.models) return cmdAttempts(o, cwd);
   const policy = policyOf(o, o.worktree ? "write" : "read");
   const tail = policy === "read" ? ASK_TAIL : TASK_TAIL;
   const id = jobId("task");
@@ -581,25 +585,60 @@ function cmdApply(o, cwd) {
 
 // ---------- multi-model comparison ----------
 
-async function cmdCompare(o, cwd) {
-  if (!o.text) throw new Error("question is required");
+function resolveModels(list, fallback) {
   const all = listModels();
-  const models = [...new Set((o.models || "pro,opus,gpt").split(",").map((m) => resolveModel(m.trim(), all)).filter(Boolean))];
+  const models = [...new Set((list || fallback).split(",").map((m) => resolveModel(m.trim(), all)).filter(Boolean))];
   if (models.length < 2) throw new Error("--models needs at least two models, e.g. --models pro,opus");
-  const prompt = `${preamble(cwd, "read", o["add-dir"])}\n\nYou are one of several independent models answering the same question; give your own best, well-reasoned answer.\n\nQUESTION:\n${o.text}\n\n${ASK_TAIL}`;
+  return models;
+}
+
+// Runs one job per model in parallel (in this process) and returns them when all have finished.
+async function fanOut(models, makeJob) {
   pruneJobs();
   const jobs = models.map((model) => {
-    const job = newJob("task", cwd, { ...o, model: null }, "read", prompt);
+    const job = makeJob(model);
     job.agyArgs.push("--model", model);
-    job.model = model;
-    job.title = short(`[compare ${model}] ${o.text}`, 70);
-    job.pid = process.pid;
+    Object.assign(job, { model, pid: process.pid });
     saveJob(job);
     return job;
   });
-  const done = await Promise.all(jobs.map(runJob));
+  return Promise.all(jobs.map(runJob));
+}
+
+// Nest a model's own Markdown headings under the per-model "##" section.
+// Lines inside ``` fences are left alone: a "# comment" in a shell snippet is not a heading.
+export function demote(text) {
+  let fenced = false;
+  return String(text || "").split("\n").map((line) => {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    return fenced ? line : line.replace(/^(#{1,4}) /, "##$1 ");
+  }).join("\n");
+}
+
+const took = (j) => `${j.status}${j.result?.duration ? `, ${Math.round(j.result.duration)}s` : ""}`;
+
+async function cmdCompare(o, cwd) {
+  if (!o.text) throw new Error("question is required");
+  const prompt = `${preamble(cwd, "read", o["add-dir"])}\n\nYou are one of several independent models answering the same question; give your own best, well-reasoned answer.\n\nQUESTION:\n${o.text}\n\n${ASK_TAIL}`;
+  const done = await fanOut(resolveModels(o.models, "pro,opus,gpt"), (model) =>
+    Object.assign(newJob("task", cwd, { ...o, model: null }, "read", prompt), { title: short(`[compare ${model}] ${o.text}`, 70) }));
   return [`# agy compare — ${done.length} models`, "", `Question: ${o.text}`, "",
-    ...done.map((j) => `## ${j.model} (${j.status}${j.result?.duration ? `, ${Math.round(j.result.duration)}s` : ""})\n\n${j.status === "completed" ? (j.result.response || "_empty response_").trim() : `Error: ${j.error}`}\n`)].join("\n");
+    ...done.map((j) => `## ${j.model} (${took(j)})\n\n${j.status === "completed" ? demote(j.result.response || "_empty response_").trim() : `Error: ${j.error}`}\n`)].join("\n");
+}
+
+// Best-of-N: every model implements the task independently in its own worktree; Claude picks a patch.
+async function cmdAttempts(o, cwd) {
+  const policy = policyOf(o, "write");
+  const done = await fanOut(resolveModels(o.models), (model) => {
+    const id = jobId("task");
+    const wt = createWorktree(cwd, id);
+    const prompt = `${preamble(wt.runCwd, policy, o["add-dir"])}\n\nTASK:\n${o.text}\n\n${TASK_TAIL}`;
+    return newJob("task", cwd, { ...o, model: null, resume: null, "resume-last": false }, policy, prompt, { id, ...wt, title: short(`[attempt ${model}] ${o.text}`, 70) });
+  });
+  return [`# agy attempts — ${done.length} independent implementations`, "", `Task: ${o.text}`, "",
+    ...done.map((j) => [`## ${j.model} (${took(j)}) — job \`${j.id}\``, "",
+      j.patch ? `\`\`\`\n${j.patchStat}\n\`\`\`\nPatch: ${j.patch} · apply with \`/agy:apply ${j.id}\`` : "_no changes_", "",
+      j.status === "completed" ? demote(j.result.response).trim() : `Error: ${j.error}`, ""].join("\n"))].join("\n");
 }
 
 function pruneJobs() {
@@ -659,9 +698,15 @@ function cmdStatus(o, cwd) {
     ...jobs.map((j) => `| \`${j.id}\` | ${j.kind} | ${j.status} | ${fmtElapsed(j)} | ${short(j.status === "running" ? j.progress || "starting" : j.title, 60).replace(/\|/g, "\\|")} |`)].join("\n");
 }
 
-function cmdResult(o, cwd) {
-  const job = o.text ? findJob(o.text, cwd) : listJobs(cwd).map(refresh).find((j) => j.status !== "running" && j.status !== "queued");
+async function cmdResult(o, cwd) {
+  let job = o.text ? findJob(o.text, cwd) : listJobs(cwd).map(refresh).find((j) => (o.wait ? true : j.status !== "running" && j.status !== "queued"));
   if (!job) throw new Error(o.text ? `no job ${o.text}` : "no finished agy jobs in this workspace");
+  // --wait blocks until the job finishes (bounded by --timeout seconds, default 540 to fit a 10-minute Bash call).
+  const deadline = Date.now() + Number(o.timeout || 540) * 1000;
+  while (o.wait && ["running", "queued"].includes(job.status) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    job = refresh(loadJob(job.id));
+  }
   if (job.status === "running" || job.status === "queued") return `Job \`${job.id}\` is still ${job.status} (${fmtElapsed(job)}, last activity: ${job.progress || "starting"}). Try again later or \`/agy:cancel ${job.id}\`.`;
   if (o.json) return JSON.stringify(job, null, 2);
   return job.rendered || render(job);
@@ -908,7 +953,10 @@ async function main() {
   // Slash commands pass "$ARGUMENTS" as one string; split it like a shell would.
   const tokens = rest.length === 1 ? tokenize(rest[0]) : rest;
   try {
-    const out = await fn(parseArgs(tokens), process.cwd());
+    const opts = parseArgs(tokens);
+    // Large context (logs, stack traces, specs) goes through a file: a single argv entry is capped at 128 KB on Linux.
+    if (opts["prompt-file"]) opts.text = [opts.text, fs.readFileSync(path.resolve(opts["prompt-file"]), "utf8").trim()].filter(Boolean).join("\n\n");
+    const out = await fn(opts, process.cwd());
     process.stdout.write(`${out}\n`);
   } catch (e) {
     // stdout + exit 0 on purpose: Claude Code drops the output of inline `!` commands that exit non-zero.

@@ -45,6 +45,9 @@ Claude can also call the **`agy-delegate`** subagent on its own. It does this fo
   - `--worktree`: agy edits a throwaway git worktree seeded with your current uncommitted and untracked files. The result comes back as a patch you apply with `/agy:apply`. Your own working tree is never touched, so several agy tasks and Claude can work at the same time.
   - `--yolo`: agy can also run shell commands and fetch URLs (`agy --dangerously-skip-permissions`). Only use this when you ask for it explicitly.
 - **Letting agy run tests.** Use `/agy:setup --allow-command "npm test"`. The rule is stored in agy's own `settings.json` and can be removed with `--revoke-command`. agy is told exactly which commands it may run, so it can run the tests and iterate until they pass, without `--yolo`. Rules that are too broad (`python3`, `bash`, `git`, …) and shell metacharacters are refused.
+- **Best-of-N.** `/agy:task --worktree --models pro,opus,gpt <task>` has each model implement the task on its own in its own worktree. Claude compares the patches and you apply the one you prefer.
+- `--prompt-file <path>` adds a file's contents to the prompt. Use it for large logs, stack traces or specs; a single command-line argument is capped at 128 KB on Linux.
+- `/agy:result <id> --wait` blocks until a background job finishes.
 - `--background` runs the job in the background. From slash commands, it runs as a Claude background task, so Claude is notified when agy finishes. Follow it with `/agy:status` and `/agy:result`.
 - `--resume-last` continues the last completed agy conversation in this workspace. `--resume <conversation-id>` continues a specific one.
 - `--model <id|pro|flash|opus|sonnet|gpt>` picks a model. An alias resolves to the newest matching model and prefers the `-high` variant.
