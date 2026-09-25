@@ -18,7 +18,21 @@
 ```bash
 node tests/companion.test.mjs                     # 全部测试，每次提交前必须通过
 claude plugin validate plugins/agy                # 校验清单
-claude plugin marketplace add "$PWD" && claude plugin install agy@agy-plugin   # 装到本机 user scope
+```
+
+**安装与更新**：本机装的是 GitHub 上的 marketplace `agy-plugin`（`MrJasonZhou/claude-code-antigravity`，分支 `master`）。本地改动推送后按下面的步骤更新，然后重启 Claude Code：
+
+```bash
+claude plugin marketplace update agy-plugin
+claude plugin update agy@agy-plugin    # 按版本号判断；不生效就先 uninstall 再 install
+```
+
+**未推送的改动只想在本机测试时**：本地目录的 marketplace 也叫 `agy-plugin`，会和 GitHub 那个同名冲突，所以要先换源，测完再换回来：
+
+```bash
+claude plugin uninstall agy@agy-plugin && claude plugin marketplace remove agy-plugin
+claude plugin marketplace add "$PWD" && claude plugin install agy@agy-plugin
+# 测完后执行同样两行，把 "$PWD" 换成 MrJasonZhou/claude-code-antigravity
 ```
 
 运行时数据位于 `~/.cache/agy-plugin/`（可用 `AGY_PLUGIN_DATA` 覆盖），agy 可执行文件可以用 `AGY_BIN` 指定。
@@ -29,7 +43,7 @@ claude plugin marketplace add "$PWD" && claude plugin install agy@agy-plugin   #
 2. **停止时审查门 + 会话移交**（`/agy:transfer`）。
 3. **隔离与协作**：`--worktree` + `/agy:apply`、命令白名单 `--allow-command`、`/agy:compare` 多模型并行、`review --commit/--pr`、Best-of-N（`--models`）、`--prompt-file`、`result --wait`、`/agy:critique`、命令审计记录。
 4. **交替审查加固**：让 agy 和 Codex 轮流做只读审查，Claude 修复，前后约 10 轮，直到两边都没有新发现。修复主要集中在白名单绕过、进程组清理、锁与原子写、worktree 边界情况以及子目录路径。
-5. 部署到本机 user scope（v0.1.0），并补充多语言 README。
+5. 补充多语言 README，发布到 GitHub（`MrJasonZhou/claude-code-antigravity`），本机改为从 GitHub 安装 v0.1.0。
 
 ## 设计决策（不要回退）
 
