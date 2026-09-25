@@ -7,7 +7,7 @@ Un plugin Claude Code qui confie du travail à **Google Antigravity CLI (`agy`)*
 ## Installation
 
 ```bash
-claude plugin marketplace add /path/to/agy_plugin
+claude plugin marketplace add MrJasonZhou/claude-code-antigravity
 claude plugin install agy@agy-plugin
 ```
 

@@ -7,7 +7,7 @@ A Claude Code plugin that hands work to **Google Antigravity CLI (`agy`)** and b
 ## Install
 
 ```bash
-claude plugin marketplace add /path/to/agy_plugin
+claude plugin marketplace add MrJasonZhou/claude-code-antigravity
 claude plugin install agy@agy-plugin
 ```
 
