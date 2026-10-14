@@ -1,6 +1,6 @@
 ---
 description: Delegate a coding task (implementation, fix, investigation) to Google Antigravity (agy)
-argument-hint: "[--write|--worktree|--yolo] [--models a,b] [--background|--wait] [--resume|--fresh] [--model <id|gemini|flash|opus|sonnet>] [--effort low|medium|high|xhigh|max] [--add-dir <dir>] <what agy should do>"
+argument-hint: "[--write|--worktree|--sandbox|--yolo] [--models a,b] [--background|--wait] [--resume|--fresh] [--model <id|gemini|flash|opus|sonnet>] [--effort low|medium|high|xhigh|max] [--add-dir <dir>] <what agy should do>"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
@@ -13,6 +13,7 @@ Permission policy (pass through exactly what the user chose):
 - no flag → read-only: agy may read files but not edit or run shell commands. Good for investigation, diagnosis, planning.
 - `--write` → agy may create and edit files in the workspace (no shell commands).
 - `--worktree` → agy edits an isolated git worktree seeded with the current uncommitted and untracked files (symlinks are kept as links; ignored dependency dirs such as node_modules/.venv are linked in so tests can run); the result is a patch the user applies with `/agy:apply`. Needs at least one commit; refused when a submodule has uncommitted changes. Prefer it when Claude is also editing, for parallel attempts, or for risky changes.
+- `--sandbox` → agy may edit files and run any shell command (build, tests) inside agy's sandbox: shell commands see a read-only filesystem except /tmp, but the network is open and files under $HOME are readable. Combine with `--worktree` so the user's tree stays untouched. Pass it when the user asked for it, or suggest it when agy needs to run tests that are not allowlisted.
 - `--yolo` → agy may also run arbitrary shell commands and fetch URLs. Only pass it when the user explicitly asked for it.
 - `--worktree --models gemini,opus` → best-of-N: each model implements the task independently in its own worktree. Present the attempts side by side (approach, diff size, risks), recommend one, and let the user pick which to `/agy:apply`.
 - Commands allowlisted with `/agy:setup --allow-command "<cmd>"` (e.g. the test command) are usable in every mode, so agy can run tests and iterate.

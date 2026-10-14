@@ -46,8 +46,9 @@ Claude 也可以自行呼叫 **`agy-delegate`** 子 agent，用於取得第二�
   - *（預設）* 唯讀：agy 可以讀取檔案，但不能編輯檔案或執行 shell 指令。
   - `--write`：agy 可以編輯工作區中的檔案（`agy --mode accept-edits`）。
   - `--worktree`：agy 在一個拋棄式 git worktree 中編輯，該 worktree 預先放入你目前未提交和未追蹤的檔案（符號連結保持為連結）。被忽略的相依目錄（如 `node_modules` 和 `.venv`）會以連結方式接入，以便執行測試，且它們絕不會進入修補檔。需要至少一個提交；若子模組有未提交變更則拒絕執行。結果以修補檔形式返回，用 `/agy:apply` 套用。你自己的工作樹不會被觸碰，因此多個 agy 任務和 Claude 可以同時工作。
+  - `--sandbox`：agy 可以在 agy 內建的沙箱裡編輯檔案並執行任意 shell 指令，例如建置和測試（`agy --sandbox --dangerously-skip-permissions`）。shell 指令看到的檔案系統除 `/tmp` 外都是唯讀的，所以改不了你的檔案；檔案修改透過 agy 的檔案編輯工具完成。網路仍然可用，家目錄下的檔案也能讀取。搭配 `--worktree` 使用，agy 就能實作功能、執行測試、反覆修改，而你的工作樹不會被觸碰。
   - `--yolo`：agy 還可以執行 shell 指令和擷取 URL（`agy --dangerously-skip-permissions`）。僅在你明確要求時使用。
-- **讓 agy 執行測試。** 使用 `/agy:setup --allow-command "npm test"`。該規則儲存在 agy 自己的全域 `settings.json` 中，因此也會作用於你的互動式 agy 工作階段。用 `--revoke-command` 移除。agy 會被明確告知可以執行哪些指令，因此不需要 `--yolo` 就能執行測試並反覆修改直到通過。開放式規則（`bash -c`、`python3 -c`、`npm exec`、`uv run` 等）和 shell 特殊字元會被拒絕。這項檢查用於防止無意間過寬的規則，它不是沙箱：被允許的測試指令會執行專案程式碼，而在 `--write` 模式下 agy 可以編輯這些程式碼。
+- **讓 agy 執行測試。** 使用 `/agy:setup --allow-command "npm test"`。該規則儲存在 agy 自己的全域 `settings.json` 中，因此也會作用於你的互動式 agy 工作階段。用 `--revoke-command` 移除。agy 會被明確告知可以執行哪些指令，因此不需要 `--yolo` 就能執行測試並反覆修改直到通過。開放式規則（`bash -c`、`python3 -c`、`npm exec`、`uv run` 等）和 shell 特殊字元會被拒絕。這項檢查用於防止無意間過寬的規則，它不是沙箱：被允許的測試指令會執行專案程式碼，而在 `--write` 模式下 agy 可以編輯這些程式碼。不想新增規則的話，用 `--sandbox` 也能讓 agy 執行測試。
 - **Best-of-N。** `/agy:task --worktree --models gemini,opus,gpt <task>` 讓每個模型在各自的 worktree 中獨立實作任務。Claude 比較這些修補檔，由你選擇套用哪一個。
 - `--prompt-file <path>` 把檔案內容加入提示詞。適用於大型日誌、堆疊追蹤或規格說明；在 Linux 上單一命令列參數上限為 128 KB。
 - `/agy:result <id> --wait` 會阻塞直到背景工作完成。

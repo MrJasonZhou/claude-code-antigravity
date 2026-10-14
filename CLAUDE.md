@@ -44,6 +44,7 @@ claude plugin marketplace add "$PWD" && claude plugin install agy@agy-plugin
 3. **隔离与协作**：`--worktree` + `/agy:apply`、命令白名单 `--allow-command`、`/agy:compare` 多模型并行、`review --commit/--pr`、Best-of-N（`--models`）、`--prompt-file`、`result --wait`、`/agy:critique`、命令审计记录。
 4. **交替审查加固**：让 agy 和 Codex 轮流做只读审查，Claude 修复，前后约 10 轮，直到两边都没有新发现。修复主要集中在白名单绕过、进程组清理、锁与原子写、worktree 边界情况以及子目录路径。
 5. 补充多语言 README，发布到 GitHub（`MrJasonZhou/claude-code-antigravity`），本机改为从 GitHub 安装 v0.1.0。
+6. 适配 agy 1.3.4（v0.1.2–0.1.3）：模型别名配合 `--effort` 解析为基础名，`pro` 别名随 Gemini Pro 下线而失效，`/agy:compare` 默认改为 `gemini,opus,gpt`；新增 `--sandbox` 模式。
 
 ## 设计决策（不要回退）
 
@@ -69,12 +70,20 @@ claude plugin marketplace add "$PWD" && claude plugin install agy@agy-plugin
 - 未跟踪文件列表用 NUL 分隔；不跟随（解引用）符号链接；超大文件只读一部分。
 - worktree 会复制未提交和未跟踪的文件，符号链接保持为链接。被忽略的依赖目录（`node_modules`、`.venv`、`venv`）通过符号链接接入，但绝不写进补丁，删除 worktree 时也不会跟随这些链接。仓库没有任何提交，或子模块有未提交改动时，直接拒绝。apply 以事务方式执行，失败时回退到三方合并。
 
+**模型别名（`resolveModel`）**
+- agy 1.3.4 起，带档位后缀的 id（`claude-opus-5-5-high`）不能和另一个 `--effort` 一起用，只写基础名（`claude-opus-5-5`）则可以。所以指定了 `--effort` 时，别名解析为基础名；没指定时仍优先选 `-high`。
+- 别名匹配不到任何模型时直接报错并列出可用模型；不是别名的未知 id 原样传给 agy（可能是 agy settings 里的自定义模型）。模型列表会变（1.3 去掉了 Gemini Pro），默认值和文档示例不要写死某个具体系列。
+
+**`--sandbox` 模式**
+- 对应 `agy --sandbox --dangerously-skip-permissions`。在 Linux 上实测：shell 命令看到的文件系统除 `/tmp` 外都是只读，网络可用，家目录可读；文件修改走 agy 的编辑工具，不受影响。
+- 它是“能跑测试、但 shell 改不了文件”的折中方案，和 `--worktree` 搭配最好。文档里必须如实写明网络是通的、家目录可读，不能把它说成完全隔离。与 `--yolo` 互斥。
+
 **审查门**
 - 用完整内容的指纹去重：同一状态只审查一次，被阻止过的状态会一直保持阻止。连续阻止 3 次后放行，放行时重置状态。agy 出错（服务中断、配额、超时）也放行。
 
 **与 Claude Code 交互的约定**
 - 内联的 `!` 命令一旦以非零码退出，Claude Code 会丢弃它的输出。所以斜杠命令里的错误要**写到 stdout 并以 0 退出**。
-- 提示词通过 stdin 传给 agy，避免超出 argv 长度限制。agy 以 headless 模式运行、无法请求审批，因此权限策略（只读 / `--write` / `--worktree` / `--yolo`）必须在前言中写清楚。
+- 提示词通过 stdin 传给 agy，避免超出 argv 长度限制。agy 以 headless 模式运行、无法请求审批，因此权限策略（只读 / `--write` / `--worktree` / `--sandbox` / `--yolo`）必须在前言中写清楚。
 
 ## 工作方式
 

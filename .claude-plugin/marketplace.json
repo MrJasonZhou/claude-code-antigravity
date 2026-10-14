@@ -1,12 +1,12 @@
 {
   "name": "agy-plugin",
   "owner": { "name": "rocky" },
-  "metadata": { "description": "Google Antigravity (agy) integration for Claude Code.", "version": "0.1.2" },
+  "metadata": { "description": "Google Antigravity (agy) integration for Claude Code.", "version": "0.1.3" },
   "plugins": [
     {
       "name": "agy",
       "description": "Delegate tasks, code reviews, web research and image generation to Google Antigravity (agy / Gemini) from Claude Code.",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "author": { "name": "rocky" },
       "source": "./plugins/agy"
     }

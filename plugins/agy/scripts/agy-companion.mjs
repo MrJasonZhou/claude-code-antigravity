@@ -45,7 +45,7 @@ export function tokenize(str) {
   return out;
 }
 
-const BOOL = new Set(["write", "yolo", "background", "wait", "json", "resume-last", "fresh", "adversarial", "all", "keep", "enable-review-gate", "disable-review-gate", "worktree", "force"]);
+const BOOL = new Set(["write", "yolo", "sandbox", "background", "wait", "json", "resume-last", "fresh", "adversarial", "all", "keep", "enable-review-gate", "disable-review-gate", "worktree", "force"]);
 const VALUE = new Set(["model", "effort", "resume", "add-dir", "timeout", "base", "scope", "out", "agent", "source", "commit", "pr", "models", "allow-command", "revoke-command", "prompt-file"]);
 
 export function parseArgs(tokens) {
@@ -190,6 +190,7 @@ function findJob(ref, cwd, all = false) {
 const POLICY = {
   read: "TOOL POLICY: READ-ONLY. Do not create or modify files. Use file viewing/search tools only. URL fetching (read_url_content) is NOT permitted and any attempt aborts the whole run.",
   write: "TOOL POLICY: you MAY create and edit files inside the workspace using file-editing tools. URL fetching (read_url_content) is NOT permitted and any attempt aborts the whole run.",
+  sandbox: "TOOL POLICY: SANDBOXED. You MAY create and edit files inside the workspace using file-editing tools, and you MAY run any shell command (run_command) to build, test and iterate until the change works. Shell commands run in a sandbox whose filesystem is read-only except /tmp: a command that writes into the workspace fails, so point caches and build output at /tmp (for example `pytest -p no:cacheprovider`) and make every file change with file-editing tools. Use the network only when the task needs it. Do not commit or push.",
   yolo: "TOOL POLICY: full access, including shell commands and URL fetching. Stay inside the workspace. Never run destructive commands (rm -rf, git reset --hard, git push --force, dropping data) and do not commit or push.",
 };
 
@@ -316,7 +317,7 @@ function updateAllowlist(cmd, add) {
 }
 
 function policyText(policy) {
-  if (policy === "yolo") return POLICY.yolo;
+  if (policy === "yolo" || policy === "sandbox") return POLICY[policy];
   const cmds = allowedCommands();
   const shell = cmds.length
     ? `Shell commands (run_command) are permitted ONLY when the whole command starts with one of these allowlisted prefixes: ${cmds.map((c) => `\`${c}\``).join(", ")}. Run them from the workspace root and do not chain other commands with && ; or |. ${policy === "write" ? "Use them to verify your change and iterate until they pass." : "Use them only for diagnosis."} Any other shell command aborts the whole run.`
@@ -528,6 +529,7 @@ async function waitUntil(check, ms) {
 function buildAgyArgs(o, policy, models) {
   const args = ["--output-format", "stream-json"];
   if (policy === "write") args.push("--mode", "accept-edits");
+  if (policy === "sandbox") args.push("--sandbox", "--dangerously-skip-permissions"); // agy's sandbox confines shell writes; edits go through file tools
   if (policy === "yolo") args.push("--dangerously-skip-permissions");
   const model = resolveModel(o.model, models || (o.model ? listModels() : []), o.effort);
   if (model) args.push("--model", model);
@@ -700,7 +702,7 @@ function render(job) {
   if (job.status === "failed") out.push("## Error", "```", job.error || "unknown error", "```", "");
   if (r?.denied?.length) {
     out.push(`> ⚠️ agy stopped because it tried a tool this run's policy does not permit: ${r.denied.map((d) => d.display_name || d.action).join(", ")}.`,
-      `> Re-run with ${job.policy === "read" ? "`--write` (file edits) or " : ""}\`--yolo\` (shell + URLs) if you trust the task.`, "");
+      `> Re-run with ${job.policy === "read" ? "`--write` (file edits), " : ""}\`--sandbox\` (edits + shell confined to a read-only filesystem) or \`--yolo\` (full shell + URLs) if you trust the task.`, "");
   }
   if (r?.response) out.push((job.kind === "review" && renderReview(r.response)) || r.response.trim(), "");
   else if (job.status === "completed") out.push("_agy returned an empty response._", "");
@@ -749,7 +751,8 @@ async function launch(job, o) {
 }
 
 function policyOf(o, fallback = "read") {
-  return o.yolo ? "yolo" : o.write ? "write" : fallback;
+  if (o.yolo && o.sandbox) throw new Error("--yolo and --sandbox are mutually exclusive");
+  return o.yolo ? "yolo" : o.sandbox ? "sandbox" : o.write ? "write" : fallback;
 }
 
 async function cmdTask(o, cwd) {

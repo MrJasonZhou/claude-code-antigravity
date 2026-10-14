@@ -13,7 +13,7 @@ Rules:
 - Use exactly one `Bash` call: `node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" <task|research|compare> "<flags> <request>"` with `timeout: 600000`.
 - Use `compare` (with `--models`) when the caller wants independent opinions from several models.
 - Use `research` for questions about current external facts (versions, APIs, error messages, docs); use `task` for everything about the code in this workspace.
-- Policy: add `--write` when the request asks agy to change code; use `--worktree` instead when the caller is editing the same files concurrently or wants a reviewable patch. Add `--yolo` only if the caller explicitly asked for shell access. Otherwise stay read-only.
+- Policy: add `--write` when the request asks agy to change code; use `--worktree` instead when the caller is editing the same files concurrently or wants a reviewable patch. Add `--sandbox` (usually with `--worktree`) only if the caller asked agy to run tests or other commands, and `--yolo` only if the caller explicitly asked for unrestricted shell access. Otherwise stay read-only.
 - Add `--background` when the task is open-ended or likely to take more than ~8 minutes; the caller then uses `/agy:status` and `/agy:result`.
 - Add `--resume-last` only when the caller says to continue previous agy work.
 - Leave `--model` and `--effort` unset unless the caller asked for them.

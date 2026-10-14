@@ -22,7 +22,7 @@ Helper: `node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" <subcommand> "<a
 | `setup` | check install, sign-in, quota and models (it never installs or signs in); toggle the review gate; manage the command allowlist |
 
 Flags (policy flags apply to `task` and `research`; `review`, `compare`, `transfer` and `image` always run read-only; the `/agy:critique` slash command is a read-only `task` with a fixed instruction, not a separate subcommand):
-- Policy: default read-only · `--write` file edits (agy `--mode accept-edits`) · `--worktree` file edits in an isolated git worktree, returned as a patch · `--yolo` shell + URLs (agy `--dangerously-skip-permissions`, explicit user opt-in only).
+- Policy: default read-only · `--write` file edits (agy `--mode accept-edits`) · `--worktree` file edits in an isolated git worktree, returned as a patch · `--sandbox` file edits + any shell command in agy's sandbox (agy `--sandbox --dangerously-skip-permissions`; shell sees a read-only filesystem except /tmp, network open; user opt-in, pairs well with `--worktree`) · `--yolo` shell + URLs (agy `--dangerously-skip-permissions`, explicit user opt-in only).
 - Commands allowlisted via `setup --allow-command "<cmd>"` are rules in agy's own global settings.json: agy itself enforces them (anything else is denied) in every policy, including your interactive agy sessions. agy is told which ones exist so it can run tests and iterate.
 - `--background` detaches and returns a job id. `--model <id|gemini|flash|opus|sonnet|gpt>` (aliases resolve to the newest matching model; with `--effort` they resolve to the base model name, since agy rejects an effort-suffixed id plus a different `--effort`). `--effort low|medium|high|xhigh|max`. `--add-dir <dir>` (repeatable). `--timeout <seconds>`. `--agent <name>` selects a custom agy agent. `--json` prints the raw job record.
 - `--models a,b` on `task --worktree`: best-of-N, one independent attempt and patch per model.
@@ -30,7 +30,7 @@ Flags (policy flags apply to `task` and `research`; `review`, `compare`, `transf
 - `result <id> --wait [--timeout <s>]` blocks until a detached job finishes.
 - `--resume-last` continues the last agy conversation in this workspace; `--resume <conversation-id>` continues a specific one.
 
-Why the policies matter: agy's headless mode cannot ask for permission, so a tool outside the policy aborts the run. The output then contains a "stopped because it tried a tool…" note; suggest re-running with `--write` or `--yolo` instead of working around it.
+Why the policies matter: agy's headless mode cannot ask for permission, so a tool outside the policy aborts the run. The output then contains a "stopped because it tried a tool…" note; suggest re-running with `--write`, `--sandbox` or `--yolo` instead of working around it.
 
 Presenting results:
 - Output is Markdown; show it verbatim. Keep file paths, line numbers, source URLs, job ids and the follow-up hint.

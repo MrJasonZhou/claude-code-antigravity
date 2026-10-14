@@ -72,6 +72,18 @@ assert.match(status, /\| task \| completed \|/);
 const cand = JSON.parse(execFileSync("node", [COMPANION, "resume-candidate"], { cwd: tmp, env, encoding: "utf8" }));
 assert.equal(cand.conversationId, "c-1");
 
+// --sandbox runs agy with its shell sandbox + auto-approval and tells agy the shell filesystem is read-only
+const sbx = path.join(tmp, "sbx-agy");
+fs.writeFileSync(sbx, `#!/usr/bin/env node
+let input=""; process.stdin.on("data",d=>input+=d); process.stdin.on("end",()=>{
+  const a=process.argv; const ok=a.includes("--sandbox")&&a.includes("--dangerously-skip-permissions")&&!a.includes("accept-edits")&&input.includes("SANDBOXED")&&input.includes("read-only except /tmp");
+  console.log(JSON.stringify({event:"result",result:{conversation_id:"s",status:"SUCCESS",response:ok?"sandboxed":"WRONG ARGS "+a.join(" ")}})); });
+`, { mode: 0o755 });
+const sbxOut = execFileSync("node", [COMPANION, "task", "--sandbox fix and run tests"], { cwd: tmp, env: { ...env, AGY_BIN: sbx }, encoding: "utf8" });
+assert.match(sbxOut, /Policy: sandbox/);
+assert.match(sbxOut, /sandboxed/);
+assert.match(execFileSync("node", [COMPANION, "task", "--sandbox --yolo x"], { cwd: tmp, env: { ...env, AGY_BIN: sbx }, encoding: "utf8" }), /mutually exclusive/);
+
 // review with nothing to review
 execFileSync("git", ["init", "-q"], { cwd: tmp });
 fs.rmSync(path.join(tmp, "agy"));
