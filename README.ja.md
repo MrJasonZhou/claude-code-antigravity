@@ -22,7 +22,7 @@ claude plugin install agy@agy-plugin
 | `/agy:review` | 構造化されたコードレビュー。対象：未コミットの変更、ブランチ（`--base`）、単一コミット（`--commit <sha>`）、GitHub PR（`--pr <n>`、`gh` を使用）。指摘は重大度順に並び、file:line が付きます。 |
 | `/agy:adversarial-review` | 設計、その前提、そして実運用でどう壊れるかに異議を唱えるレビュー。 |
 | `/agy:critique <plan or file>` | コードを書く前に、計画・設計書・RFC を批判的にレビューします。agy は各前提を実際のコードと照合します。 |
-| `/agy:compare <question>` | 同じ質問を複数のモデルに並列で投げます（既定は `pro,opus,gpt`、つまり agy 経由の Gemini、Claude、GPT）。その後 Claude が一致点と相違点をまとめます。 |
+| `/agy:compare <question>` | 同じ質問を複数のモデルに並列で投げます（既定は `gemini,opus,gpt`、つまり agy 経由の Gemini、Claude、GPT）。その後 Claude が一致点と相違点をまとめます。 |
 | `/agy:apply [id]` | `--worktree` タスクのパッチを適用します。必要に応じて 3-way マージにフォールバックします。 |
 | `/agy:research <question>` | リアルタイムの Google 検索に基づき、ソース URL 付きで回答します。 |
 | `/agy:image <description>` | 画像を生成します。ファイルは `agy-images/`、または `--out` で指定したディレクトリに保存されます。 |
@@ -48,13 +48,13 @@ Claude は **`agy-delegate`** サブエージェントを自ら呼び出すこ�
   - `--worktree`：agy は使い捨ての git worktree で編集します。この worktree には現在の未コミット・未追跡ファイルが事前に入ります（シンボリックリンクはリンクのまま）。`node_modules` や `.venv` など無視された依存ディレクトリはテストを実行できるようリンクされ、パッチには決して含まれません。少なくとも 1 つのコミットが必要で、サブモジュールに未コミットの変更がある場合は実行を拒否します。結果はパッチとして返り、`/agy:apply` で適用します。自分の作業ツリーには一切触れないため、複数の agy タスクと Claude が同時に作業できます。
   - `--yolo`：agy はシェルコマンドの実行や URL の取得もできます（`agy --dangerously-skip-permissions`）。明示的に求めた場合にのみ使ってください。
 - **agy にテストを実行させる。** `/agy:setup --allow-command "npm test"` を使います。ルールは agy 自身のグローバル `settings.json` に保存されるため、対話型の agy セッションにも適用されます。`--revoke-command` で削除します。agy には実行してよいコマンドが正確に伝えられるので、`--yolo` なしでテストを実行し、通るまで反復できます。制限のないルール（`bash -c`、`python3 -c`、`npm exec`、`uv run` など）やシェルのメタ文字は拒否されます。このチェックはうっかり広すぎるルールを防ぐためのもので、サンドボックスではありません。許可したテストコマンドはプロジェクトのコードを実行し、`--write` モードでは agy がそのコードを編集できます。
-- **Best-of-N。** `/agy:task --worktree --models pro,opus,gpt <task>` では、各モデルがそれぞれの worktree で独立にタスクを実装します。Claude がパッチを比較し、あなたが好きなものを適用します。
+- **Best-of-N。** `/agy:task --worktree --models gemini,opus,gpt <task>` では、各モデルがそれぞれの worktree で独立にタスクを実装します。Claude がパッチを比較し、あなたが好きなものを適用します。
 - `--prompt-file <path>` はファイルの内容をプロンプトに追加します。大きなログ、スタックトレース、仕様書に使います。Linux ではコマンドライン引数 1 つあたり 128 KB が上限です。
 - `/agy:result <id> --wait` はバックグラウンドジョブが終わるまで待機します。
 - `--background` はジョブをバックグラウンドで実行します。スラッシュコマンドからは Claude のバックグラウンドタスクとして実行されるため、agy が終わると Claude に通知されます。その後 `/agy:status` と `/agy:result` を使います。
 - `--resume-last` はこのワークスペースで最後に完了した agy 会話を続けます。`--resume <conversation-id>` は特定の会話を続けます。
-- `--model <id|pro|flash|opus|sonnet|gpt>` でモデルを選びます。エイリアスは一致する最新のモデルに解決され、`-high` バリアントが優先されます。
-- `--effort low|medium|high`、`--add-dir <dir>`、`--timeout <sec>`、`--agent <custom agy agent>`、`--json`。
+- `--model <id|gemini|flash|opus|sonnet|gpt>` でモデルを選びます。エイリアスは一致する最新のモデルに解決され、`-high` バリアントが優先されます。`--effort` を指定した場合は、エイリアスはモデルの基本名（例：`claude-opus-5-5`）に解決されます。agy は `-high` 付きの id と異なる effort の組み合わせを拒否するためです。利用可能なモデルに一致しないエイリアスはエラーになります。
+- `--effort low|medium|high|xhigh|max`、`--add-dir <dir>`、`--timeout <sec>`、`--agent <custom agy agent>`、`--json`。
 
 ### agy に伝わる内容と返ってくるもの
 

@@ -22,7 +22,7 @@ claude plugin install agy@agy-plugin
 | `/agy:review` | 結構化程式碼審查。目標：未提交的變更、某個分支（`--base`）、單一提交（`--commit <sha>`）或 GitHub PR（`--pr <n>`，使用 `gh`）。發現的問題依嚴重程度排序，並附上 file:line。 |
 | `/agy:adversarial-review` | 對設計、其假設以及它在實際使用中如何失敗進行質疑式審查。 |
 | `/agy:critique <plan or file>` | 在撰寫任何程式碼之前，對計畫、設計文件或 RFC 進行對抗式審查。agy 會用實際程式碼逐條檢驗每個假設。 |
-| `/agy:compare <question>` | 平行向多個模型提出同一問題（預設 `pro,opus,gpt`，即透過 agy 呼叫 Gemini、Claude 和 GPT）。接著由 Claude 總結它們的共識與分歧。 |
+| `/agy:compare <question>` | 平行向多個模型提出同一問題（預設 `gemini,opus,gpt`，即透過 agy 呼叫 Gemini、Claude 和 GPT）。接著由 Claude 總結它們的共識與分歧。 |
 | `/agy:apply [id]` | 套用 `--worktree` 任務產生的修補檔。必要時退回三方合併。 |
 | `/agy:research <question>` | 根據即時 Google 搜尋回答，並附上來源 URL。 |
 | `/agy:image <description>` | 生成影像。檔案儲存到 `agy-images/`，或 `--out` 指定的目錄。 |
@@ -48,13 +48,13 @@ Claude 也可以自行呼叫 **`agy-delegate`** 子 agent，用於取得第二�
   - `--worktree`：agy 在一個拋棄式 git worktree 中編輯，該 worktree 預先放入你目前未提交和未追蹤的檔案（符號連結保持為連結）。被忽略的相依目錄（如 `node_modules` 和 `.venv`）會以連結方式接入，以便執行測試，且它們絕不會進入修補檔。需要至少一個提交；若子模組有未提交變更則拒絕執行。結果以修補檔形式返回，用 `/agy:apply` 套用。你自己的工作樹不會被觸碰，因此多個 agy 任務和 Claude 可以同時工作。
   - `--yolo`：agy 還可以執行 shell 指令和擷取 URL（`agy --dangerously-skip-permissions`）。僅在你明確要求時使用。
 - **讓 agy 執行測試。** 使用 `/agy:setup --allow-command "npm test"`。該規則儲存在 agy 自己的全域 `settings.json` 中，因此也會作用於你的互動式 agy 工作階段。用 `--revoke-command` 移除。agy 會被明確告知可以執行哪些指令，因此不需要 `--yolo` 就能執行測試並反覆修改直到通過。開放式規則（`bash -c`、`python3 -c`、`npm exec`、`uv run` 等）和 shell 特殊字元會被拒絕。這項檢查用於防止無意間過寬的規則，它不是沙箱：被允許的測試指令會執行專案程式碼，而在 `--write` 模式下 agy 可以編輯這些程式碼。
-- **Best-of-N。** `/agy:task --worktree --models pro,opus,gpt <task>` 讓每個模型在各自的 worktree 中獨立實作任務。Claude 比較這些修補檔，由你選擇套用哪一個。
+- **Best-of-N。** `/agy:task --worktree --models gemini,opus,gpt <task>` 讓每個模型在各自的 worktree 中獨立實作任務。Claude 比較這些修補檔，由你選擇套用哪一個。
 - `--prompt-file <path>` 把檔案內容加入提示詞。適用於大型日誌、堆疊追蹤或規格說明；在 Linux 上單一命令列參數上限為 128 KB。
 - `/agy:result <id> --wait` 會阻塞直到背景工作完成。
 - `--background` 在背景執行工作。從斜線指令啟動時，它作為 Claude 背景任務執行，因此 agy 完成時 Claude 會收到通知。接著使用 `/agy:status` 和 `/agy:result`。
 - `--resume-last` 繼續該工作區中最近一次完成的 agy 對話。`--resume <conversation-id>` 繼續指定的對話。
-- `--model <id|pro|flash|opus|sonnet|gpt>` 選擇模型。別名會解析為最新的相符模型，並優先選擇 `-high` 變體。
-- `--effort low|medium|high`、`--add-dir <dir>`、`--timeout <sec>`、`--agent <custom agy agent>`、`--json`。
+- `--model <id|gemini|flash|opus|sonnet|gpt>` 選擇模型。別名會解析為最新的相符模型，並優先選擇 `-high` 變體。指定 `--effort` 時，別名會改為解析成模型的基礎名稱（例如 `claude-opus-5-5`），因為 agy 不接受帶 `-high` 後綴的 id 與其他檔位組合。比對不到任何可用模型的別名會直接報錯。
+- `--effort low|medium|high|xhigh|max`、`--add-dir <dir>`、`--timeout <sec>`、`--agent <custom agy agent>`、`--json`。
 
 ### agy 收到什麼，你得到什麼
 

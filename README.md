@@ -22,7 +22,7 @@ Requirements: Node ≥ 18, and `agy` on `PATH` (or set `AGY_BIN`). You must have
 | `/agy:review` | Structured code review. Targets: uncommitted changes, a branch (`--base`), one commit (`--commit <sha>`), or a GitHub PR (`--pr <n>`, uses `gh`). Findings are sorted by severity and include file:line. |
 | `/agy:adversarial-review` | Review that challenges the design, its assumptions and how it fails in real use. |
 | `/agy:critique <plan or file>` | Adversarial review of a plan, design doc or RFC before any code is written. agy checks each assumption against the actual code. |
-| `/agy:compare <question>` | Ask several models the same question in parallel (default `pro,opus,gpt`, i.e. Gemini, Claude and GPT through agy). Claude then summarizes where they agree and disagree. |
+| `/agy:compare <question>` | Ask several models the same question in parallel (default `gemini,opus,gpt`, i.e. Gemini, Claude and GPT through agy). Claude then summarizes where they agree and disagree. |
 | `/agy:apply [id]` | Apply the patch from a `--worktree` task. Falls back to a 3-way merge when needed. |
 | `/agy:research <question>` | Answer from live Google Search, with source URLs. |
 | `/agy:image <description>` | Generate images. Files are saved to `agy-images/`, or to the directory given by `--out`. |
@@ -48,13 +48,13 @@ Claude can also call the **`agy-delegate`** subagent on its own. It does this fo
   - `--worktree`: agy edits a throwaway git worktree seeded with your current uncommitted and untracked files (symlinks are kept as links). Ignored dependency folders such as `node_modules` and `.venv` are linked in so tests can run, and they are never part of the patch. It needs at least one commit and refuses to run when a submodule has uncommitted changes. The result comes back as a patch you apply with `/agy:apply`. Your own working tree is never touched, so several agy tasks and Claude can work at the same time.
   - `--yolo`: agy can also run shell commands and fetch URLs (`agy --dangerously-skip-permissions`). Only use this when you ask for it explicitly.
 - **Letting agy run tests.** Use `/agy:setup --allow-command "npm test"`. The rule is stored in agy's own global `settings.json`, so it also applies to your interactive agy sessions. Remove it with `--revoke-command`. agy is told exactly which commands it may run, so it can run the tests and iterate until they pass, without `--yolo`. Open-ended rules (`bash -c`, `python3 -c`, `npm exec`, `uv run`, …) and shell metacharacters are refused. This check stops rules that are too broad by accident. It is not a sandbox: an allowed test command runs project code, and in `--write` mode agy can edit that code.
-- **Best-of-N.** `/agy:task --worktree --models pro,opus,gpt <task>` has each model implement the task on its own in its own worktree. Claude compares the patches and you apply the one you prefer.
+- **Best-of-N.** `/agy:task --worktree --models gemini,opus,gpt <task>` has each model implement the task on its own in its own worktree. Claude compares the patches and you apply the one you prefer.
 - `--prompt-file <path>` adds a file's contents to the prompt. Use it for large logs, stack traces or specs; a single command-line argument is capped at 128 KB on Linux.
 - `/agy:result <id> --wait` blocks until a background job finishes.
 - `--background` runs the job in the background. From slash commands, it runs as a Claude background task, so Claude is notified when agy finishes. Follow it with `/agy:status` and `/agy:result`.
 - `--resume-last` continues the last completed agy conversation in this workspace. `--resume <conversation-id>` continues a specific one.
-- `--model <id|pro|flash|opus|sonnet|gpt>` picks a model. An alias resolves to the newest matching model and prefers the `-high` variant.
-- `--effort low|medium|high`, `--add-dir <dir>`, `--timeout <sec>`, `--agent <custom agy agent>`, `--json`.
+- `--model <id|gemini|flash|opus|sonnet|gpt>` picks a model. An alias resolves to the newest matching model and prefers the `-high` variant. With `--effort`, the alias resolves to the base model name instead (for example `claude-opus-5-5`), since agy rejects a `-high` id combined with a different effort. An alias that matches no available model is an error.
+- `--effort low|medium|high|xhigh|max`, `--add-dir <dir>`, `--timeout <sec>`, `--agent <custom agy agent>`, `--json`.
 
 ### What agy is told and what you get back
 

@@ -25,6 +25,15 @@ const models = [{ id: "gemini-3.1-pro-low" }, { id: "gemini-3.1-pro-high" }, { i
 assert.equal(m.resolveModel("pro", models), "gemini-3.1-pro-high");
 assert.equal(m.resolveModel("opus", models), "claude-opus-4-6-thinking");
 assert.equal(m.resolveModel("my-custom", models), "my-custom");
+// agy >= 1.3.4: an effort-suffixed id conflicts with --effort, so an alias plus --effort resolves to the base name;
+// an alias matching no model fails up front (agy 1.3 dropped Gemini Pro, which broke the old `pro` default).
+const models13 = [{ id: "gemini-3.8-flash-high" }, { id: "gemini-3.8-flash-low" }, { id: "claude-opus-5-5-low" }, { id: "claude-opus-5-5-high" }, { id: "gpt-oss-120b-medium" }];
+assert.equal(m.resolveModel("opus", models13), "claude-opus-5-5-high");
+assert.equal(m.resolveModel("opus", models13, "low"), "claude-opus-5-5");
+assert.equal(m.resolveModel("gemini", models13, "max"), "gemini-3.8-flash");
+assert.equal(m.resolveModel("claude-opus-5-5-low", models13, "high"), "claude-opus-5-5-low"); // exact ids are the user's call
+assert.throws(() => m.resolveModel("pro", models13), /no agy model matches "pro".*gemini-3\.8-flash-high/);
+assert.equal(m.resolveModel("pro", []), "pro"); // model list unavailable: let agy report it
 
 // renderReview sorts by severity and tolerates prose around the JSON
 const review = m.renderReview(`here: ${JSON.stringify({ verdict: "needs-attention", summary: "s", next_steps: [],

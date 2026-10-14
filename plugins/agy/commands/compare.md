@@ -1,6 +1,6 @@
 ---
 description: Ask several models through agy (Gemini, Claude, GPT) the same question in parallel and compare their answers
-argument-hint: "[--models pro,opus,gpt] [--background] <question>"
+argument-hint: "[--models gemini,opus,gpt] [--background] <question>"
 allowed-tools: Bash(node:*)
 ---
 
@@ -13,7 +13,7 @@ If the request includes `--background`, strip it and run the command with `Bash(
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" compare "<arguments>"
 ```
-- Default models are `pro,opus,gpt` (aliases resolve to the newest matching model). Pass through a user-supplied `--models` list unchanged.
+- Default models are `gemini,opus,gpt` (aliases resolve to the newest matching model). Pass through a user-supplied `--models` list unchanged.
 
 Then:
 1. Show each model's answer (you may trim repetition, but keep every concrete claim and file:line reference).

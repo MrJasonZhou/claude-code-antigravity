@@ -1,6 +1,6 @@
 ---
 description: Ask Google Antigravity (agy / Gemini, long context) a read-only question about this codebase or get a second opinion
-argument-hint: "[--background] [--model <id|pro|flash>] [--add-dir <dir>] <question>"
+argument-hint: "[--background] [--model <id|gemini|flash|opus>] [--add-dir <dir>] <question>"
 allowed-tools: Bash(node:*)
 ---
 

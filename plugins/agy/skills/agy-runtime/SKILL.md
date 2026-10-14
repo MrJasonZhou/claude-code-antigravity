@@ -12,7 +12,7 @@ Helper: `node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" <subcommand> "<a
 |---|---|
 | `task` | delegate coding work / questions about the workspace |
 | `review` | structured code review of working tree, branch (`--base`), one commit (`--commit`), or a GitHub PR (`--pr`); `--adversarial`, focus text |
-| `compare` | same read-only question to several models in parallel (`--models pro,opus,gpt`) |
+| `compare` | same read-only question to several models in parallel (`--models gemini,opus,gpt`) |
 | `apply [id] [--force]` | apply the patch from a `--worktree` task; if it would conflict, nothing is changed unless `--force` (then conflict markers are written) |
 | `transfer` | hand the current Claude session to agy |
 | `research` | Google-Search-backed answer with source URLs |
@@ -24,7 +24,7 @@ Helper: `node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-companion.mjs" <subcommand> "<a
 Flags (policy flags apply to `task` and `research`; `review`, `compare`, `transfer` and `image` always run read-only; the `/agy:critique` slash command is a read-only `task` with a fixed instruction, not a separate subcommand):
 - Policy: default read-only · `--write` file edits (agy `--mode accept-edits`) · `--worktree` file edits in an isolated git worktree, returned as a patch · `--yolo` shell + URLs (agy `--dangerously-skip-permissions`, explicit user opt-in only).
 - Commands allowlisted via `setup --allow-command "<cmd>"` are rules in agy's own global settings.json: agy itself enforces them (anything else is denied) in every policy, including your interactive agy sessions. agy is told which ones exist so it can run tests and iterate.
-- `--background` detaches and returns a job id. `--model <id|pro|flash|opus|sonnet|gpt>` (aliases resolve to the newest matching model). `--effort low|medium|high`. `--add-dir <dir>` (repeatable). `--timeout <seconds>`. `--agent <name>` selects a custom agy agent. `--json` prints the raw job record.
+- `--background` detaches and returns a job id. `--model <id|gemini|flash|opus|sonnet|gpt>` (aliases resolve to the newest matching model; with `--effort` they resolve to the base model name, since agy rejects an effort-suffixed id plus a different `--effort`). `--effort low|medium|high|xhigh|max`. `--add-dir <dir>` (repeatable). `--timeout <seconds>`. `--agent <name>` selects a custom agy agent. `--json` prints the raw job record.
 - `--models a,b` on `task --worktree`: best-of-N, one independent attempt and patch per model.
 - `--prompt-file <path>` appends a file's contents to the prompt; use it for large logs or specs (argv entries are capped at 128 KB).
 - `result <id> --wait [--timeout <s>]` blocks until a detached job finishes.

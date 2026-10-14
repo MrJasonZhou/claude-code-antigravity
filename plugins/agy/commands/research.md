@@ -1,6 +1,6 @@
 ---
 description: Have agy research a question on the live web with Google Search and return a cited answer
-argument-hint: "[--background] [--yolo] [--model <id|pro|flash>] <question>"
+argument-hint: "[--background] [--yolo] [--model <id|gemini|flash|opus>] <question>"
 allowed-tools: Bash(node:*)
 ---
 

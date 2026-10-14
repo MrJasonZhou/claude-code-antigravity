@@ -22,7 +22,7 @@ Prérequis : Node ≥ 18 et `agy` dans le `PATH` (ou définissez `AGY_BIN`). Vou
 | `/agy:review` | Revue de code structurée. Cibles : modifications non commitées, une branche (`--base`), un commit (`--commit <sha>`) ou une PR GitHub (`--pr <n>`, utilise `gh`). Les constats sont triés par gravité et indiquent file:line. |
 | `/agy:adversarial-review` | Revue qui remet en cause la conception, ses hypothèses et la façon dont elle échoue en usage réel. |
 | `/agy:critique <plan or file>` | Revue contradictoire d'un plan, d'un document de conception ou d'une RFC avant d'écrire le moindre code. agy confronte chaque hypothèse au code réel. |
-| `/agy:compare <question>` | Poser la même question à plusieurs modèles en parallèle (par défaut `pro,opus,gpt`, c.-à-d. Gemini, Claude et GPT via agy). Claude résume ensuite leurs points d'accord et de désaccord. |
+| `/agy:compare <question>` | Poser la même question à plusieurs modèles en parallèle (par défaut `gemini,opus,gpt`, c.-à-d. Gemini, Claude et GPT via agy). Claude résume ensuite leurs points d'accord et de désaccord. |
 | `/agy:apply [id]` | Appliquer le patch d'une tâche `--worktree`. Bascule sur une fusion à trois voies si nécessaire. |
 | `/agy:research <question>` | Répondre à partir de la recherche Google en direct, avec les URL des sources. |
 | `/agy:image <description>` | Générer des images. Les fichiers sont enregistrés dans `agy-images/`, ou dans le répertoire indiqué par `--out`. |
@@ -48,13 +48,13 @@ Claude peut aussi appeler de lui-même le sous-agent **`agy-delegate`**. Il le f
   - `--worktree` : agy modifie un git worktree jetable, pré-rempli avec vos fichiers actuels non commités et non suivis (les liens symboliques restent des liens). Les dossiers de dépendances ignorés comme `node_modules` et `.venv` y sont liés pour que les tests puissent s'exécuter, et ne font jamais partie du patch. Il faut au moins un commit, et l'exécution est refusée si un sous-module a des modifications non commitées. Le résultat revient sous forme de patch à appliquer avec `/agy:apply`. Votre propre arbre de travail n'est jamais touché, donc plusieurs tâches agy et Claude peuvent travailler en même temps.
   - `--yolo` : agy peut aussi exécuter des commandes shell et récupérer des URL (`agy --dangerously-skip-permissions`). À n'utiliser que si vous le demandez explicitement.
 - **Laisser agy lancer les tests.** Utilisez `/agy:setup --allow-command "npm test"`. La règle est enregistrée dans le `settings.json` global d'agy, elle s'applique donc aussi à vos sessions agy interactives. Supprimez-la avec `--revoke-command`. agy sait exactement quelles commandes il peut lancer, il peut donc exécuter les tests et itérer jusqu'à ce qu'ils passent, sans `--yolo`. Les règles ouvertes (`bash -c`, `python3 -c`, `npm exec`, `uv run`, …) et les métacaractères du shell sont refusés. Ce contrôle empêche les règles trop larges par inadvertance. Ce n'est pas un bac à sable : une commande de test autorisée exécute le code du projet, et en mode `--write` agy peut modifier ce code.
-- **Best-of-N.** `/agy:task --worktree --models pro,opus,gpt <task>` fait implémenter la tâche par chaque modèle, indépendamment, dans son propre worktree. Claude compare les patches et vous appliquez celui que vous préférez.
+- **Best-of-N.** `/agy:task --worktree --models gemini,opus,gpt <task>` fait implémenter la tâche par chaque modèle, indépendamment, dans son propre worktree. Claude compare les patches et vous appliquez celui que vous préférez.
 - `--prompt-file <path>` ajoute le contenu d'un fichier au prompt. Utile pour de gros journaux, des traces de pile ou des spécifications ; un argument de ligne de commande est limité à 128 Ko sous Linux.
 - `/agy:result <id> --wait` attend la fin d'une tâche en arrière-plan.
 - `--background` exécute la tâche en arrière-plan. Depuis les commandes slash, elle s'exécute comme tâche d'arrière-plan de Claude, qui est donc notifié quand agy termine. Enchaînez avec `/agy:status` et `/agy:result`.
 - `--resume-last` reprend la dernière conversation agy terminée dans cet espace de travail. `--resume <conversation-id>` reprend une conversation précise.
-- `--model <id|pro|flash|opus|sonnet|gpt>` choisit un modèle. Un alias se résout vers le modèle correspondant le plus récent et privilégie la variante `-high`.
-- `--effort low|medium|high`, `--add-dir <dir>`, `--timeout <sec>`, `--agent <custom agy agent>`, `--json`.
+- `--model <id|gemini|flash|opus|sonnet|gpt>` choisit un modèle. Un alias se résout vers le modèle correspondant le plus récent et privilégie la variante `-high`. Avec `--effort`, l'alias se résout plutôt vers le nom de base du modèle (par exemple `claude-opus-5-5`), car agy refuse un id `-high` combiné à un autre niveau d'effort. Un alias qui ne correspond à aucun modèle disponible provoque une erreur.
+- `--effort low|medium|high|xhigh|max`, `--add-dir <dir>`, `--timeout <sec>`, `--agent <custom agy agent>`, `--json`.
 
 ### Ce qu'agy reçoit et ce que vous obtenez
 

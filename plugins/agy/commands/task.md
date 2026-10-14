@@ -1,6 +1,6 @@
 ---
 description: Delegate a coding task (implementation, fix, investigation) to Google Antigravity (agy)
-argument-hint: "[--write|--worktree|--yolo] [--models a,b] [--background|--wait] [--resume|--fresh] [--model <id|pro|flash|opus|sonnet>] [--effort low|medium|high] [--add-dir <dir>] <what agy should do>"
+argument-hint: "[--write|--worktree|--yolo] [--models a,b] [--background|--wait] [--resume|--fresh] [--model <id|gemini|flash|opus|sonnet>] [--effort low|medium|high|xhigh|max] [--add-dir <dir>] <what agy should do>"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
@@ -14,7 +14,7 @@ Permission policy (pass through exactly what the user chose):
 - `--write` → agy may create and edit files in the workspace (no shell commands).
 - `--worktree` → agy edits an isolated git worktree seeded with the current uncommitted and untracked files (symlinks are kept as links; ignored dependency dirs such as node_modules/.venv are linked in so tests can run); the result is a patch the user applies with `/agy:apply`. Needs at least one commit; refused when a submodule has uncommitted changes. Prefer it when Claude is also editing, for parallel attempts, or for risky changes.
 - `--yolo` → agy may also run arbitrary shell commands and fetch URLs. Only pass it when the user explicitly asked for it.
-- `--worktree --models pro,opus` → best-of-N: each model implements the task independently in its own worktree. Present the attempts side by side (approach, diff size, risks), recommend one, and let the user pick which to `/agy:apply`.
+- `--worktree --models gemini,opus` → best-of-N: each model implements the task independently in its own worktree. Present the attempts side by side (approach, diff size, risks), recommend one, and let the user pick which to `/agy:apply`.
 - Commands allowlisted with `/agy:setup --allow-command "<cmd>"` (e.g. the test command) are usable in every mode, so agy can run tests and iterate.
 - If the user clearly asks agy to implement/fix/change something but gave no policy flag, add `--write`.
 

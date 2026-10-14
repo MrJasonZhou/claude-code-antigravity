@@ -1,6 +1,6 @@
 ---
 description: Have agy critically review a plan, design doc or proposal against this codebase before any code is written
-argument-hint: "[--model <id|pro|opus>] [--background] <plan text | path to plan/design file>"
+argument-hint: "[--model <id|gemini|opus>] [--background] <plan text | path to plan/design file>"
 allowed-tools: Bash(node:*), Write
 ---
 

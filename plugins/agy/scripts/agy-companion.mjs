@@ -93,12 +93,22 @@ function listModels() {
     .map((l) => { const [id, name] = l.split("\t"); return { id: id.trim(), name: name.trim() }; });
 }
 
-// `pro`, `flash`, `opus`, `sonnet`, `claude`, `gpt` -> newest matching model id (prefers -high variants).
-export function resolveModel(value, models) {
+const ALIASES = new Set(["pro", "flash", "gemini", "opus", "sonnet", "claude", "gpt"]);
+const EFFORT_SUFFIX = /-(low|medium|high|xhigh|max)$/;
+
+// Alias -> newest matching model id (prefers -high variants). With --effort, the alias resolves to the base
+// name (claude-opus-5-5) because agy refuses an effort-suffixed id combined with a different --effort.
+// Exact and unknown non-alias ids (custom models in agy's settings) pass through; an alias that matches
+// nothing is an error rather than a doomed agy run.
+export function resolveModel(value, models, effort) {
   if (!value) return null;
   if (models.some((m) => m.id === value)) return value;
   const hits = models.filter((m) => m.id.includes(value.toLowerCase()));
-  if (!hits.length) return value;
+  if (!hits.length) {
+    if (models.length && ALIASES.has(value.toLowerCase())) throw new Error(`no agy model matches "${value}"; available: ${models.map((m) => m.id).join(", ")}`);
+    return value;
+  }
+  if (effort) return hits[0].id.replace(EFFORT_SUFFIX, "");
   return (hits.find((m) => /high|thinking/.test(m.id)) || hits[0]).id;
 }
 
@@ -519,7 +529,7 @@ function buildAgyArgs(o, policy, models) {
   const args = ["--output-format", "stream-json"];
   if (policy === "write") args.push("--mode", "accept-edits");
   if (policy === "yolo") args.push("--dangerously-skip-permissions");
-  const model = resolveModel(o.model, models || (o.model ? listModels() : []));
+  const model = resolveModel(o.model, models || (o.model ? listModels() : []), o.effort);
   if (model) args.push("--model", model);
   if (o.effort) args.push("--effort", o.effort);
   if (o.agent) args.push("--agent", o.agent);
@@ -716,7 +726,7 @@ function newJob(kind, cwd, o, policy, prompt, extra = {}) {
     id: jobId(kind),
     kind, cwd, policy, status: "queued", createdAt: new Date().toISOString(),
     title: short(o.text || extra.reviewLabel || kind, 70),
-    model: resolveModel(o.model, models), agyArgs: buildAgyArgs(o, policy, models), prompt, ...extra,
+    model: resolveModel(o.model, models, o.effort), agyArgs: buildAgyArgs(o, policy, models), prompt, ...extra,
   };
   let resumeId = o.resume || (o["resume-last"] && !o.fresh ? lastResumable(cwd)?.conversationId : null);
   if (o["resume-last"] && !o.fresh && !resumeId) throw new Error("no previous agy task in this workspace to resume");
@@ -862,10 +872,10 @@ function cmdApply(o, cwd) {
 
 // ---------- multi-model comparison ----------
 
-function resolveModels(list, fallback) {
+function resolveModels(list, fallback, effort) {
   const all = listModels();
-  const models = [...new Set((list || fallback).split(",").map((m) => resolveModel(m.trim(), all)).filter(Boolean))];
-  if (models.length < 2) throw new Error("--models needs at least two models, e.g. --models pro,opus");
+  const models = [...new Set((list || fallback).split(",").map((m) => resolveModel(m.trim(), all, effort)).filter(Boolean))];
+  if (models.length < 2) throw new Error("--models needs at least two models, e.g. --models gemini,opus");
   return models;
 }
 
@@ -903,7 +913,7 @@ const took = (j) => `${j.status}${j.result?.duration ? `, ${Math.round(j.result.
 async function cmdCompare(o, cwd) {
   if (!o.text) throw new Error("question is required");
   const prompt = `${preamble(cwd, "read", o["add-dir"])}\n\nYou are one of several independent models answering the same question; give your own best, well-reasoned answer.\n\nQUESTION:\n${o.text}\n\n${ASK_TAIL}`;
-  const done = await fanOut(resolveModels(o.models, "pro,opus,gpt"), (model) =>
+  const done = await fanOut(resolveModels(o.models, "gemini,opus,gpt", o.effort), (model) =>
     Object.assign(newJob("task", cwd, { ...o, model: null }, "read", prompt), { title: short(`[compare ${model}] ${o.text}`, 70) }));
   return [`# agy compare — ${done.length} models`, "", `Question: ${o.text}`, "",
     ...done.map((j) => `## ${j.model} (${took(j)})\n\n${j.status === "completed" ? demote(j.result.response || "_empty response_").trim() : `Error: ${j.error}`}\n`)].join("\n");
@@ -912,7 +922,7 @@ async function cmdCompare(o, cwd) {
 // Best-of-N: every model implements the task independently in its own worktree; Claude picks a patch.
 async function cmdAttempts(o, cwd) {
   const policy = policyOf(o, "write");
-  const done = await fanOut(resolveModels(o.models), (model) => {
+  const done = await fanOut(resolveModels(o.models, undefined, o.effort), (model) => {
     const id = jobId("task");
     const wt = createWorktree(cwd, id);
     const prompt = `${preamble(wt.runCwd, policy, o["add-dir"])}\n\nTASK:\n${o.text}\n\n${TASK_TAIL}`;
@@ -1077,7 +1087,7 @@ function cmdSetup(o, cwd) {
     lines.push(`- authenticated: ${report.authenticated ? "yes" : "NO — run `! agy` once and sign in"}`);
     if (report.quota) lines.push("", "## Quota", "", "| group | window | remaining | resets |", "|---|---|---|---|",
       ...report.quota.split("\n").map((l) => `| ${l.split("\t").join(" | ")} |`));
-    if (report.models.length) lines.push("", "## Models (use with --model, or aliases: pro, flash, opus, sonnet, gpt)", "", ...report.models.map((m) => `- ${m}`));
+    if (report.models.length) lines.push("", "## Models (use with --model, or aliases: gemini, flash, pro, opus, sonnet, gpt)", "", ...report.models.map((m) => `- ${m}`));
     if (report.error) lines.push("", "## Error", "```", report.error, "```");
   }
   lines.push("", `- stop-time review gate for ${cwd}: ${loadConfig().reviewGate?.[cwd] ? "ENABLED" : "disabled"} (toggle with --enable-review-gate / --disable-review-gate)`);

@@ -1,6 +1,6 @@
 ---
 description: Run an agy (Gemini) code review of uncommitted changes or the current branch
-argument-hint: "[--wait|--background] [--base <ref>|--commit <sha>|--pr <number>] [--scope auto|working-tree|branch] [--model <id|pro|flash>] [focus text]"
+argument-hint: "[--wait|--background] [--base <ref>|--commit <sha>|--pr <number>] [--scope auto|working-tree|branch] [--model <id|gemini|flash|opus>] [focus text]"
 allowed-tools: Bash(node:*), Bash(git:*), AskUserQuestion
 ---
 
