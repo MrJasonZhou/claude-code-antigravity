@@ -451,4 +451,47 @@ fs.rmSync(`${cfgFile}.lock`);
 execFileSync("node", [COMPANION, "setup", "--disable-review-gate"], { cwd: wrepo, env: wenv, encoding: "utf8" });
 assert.equal(fs.existsSync(`${cfgFile}.lock`), false); // our own lock is released
 
+// --flag="value" / --flag='a b': the quote right after "--flag=" opens quoting; other text keeps its quotes
+const q = m.parseArgs(m.tokenize(`--models="gemini,opus" --model='flash' --allow-command="npm test" set FOO="a b"`));
+assert.equal(q.models, "gemini,opus");
+assert.equal(q.model, "flash");
+assert.equal(q["allow-command"], "npm test");
+assert.equal(q.text, `set FOO="a b"`);
+
+// review findings: severity is matched case-insensitively and unknown severities sort last, never above critical
+const sev = m.renderReview(JSON.stringify({ verdict: "needs-attention", summary: "s", next_steps: [],
+  findings: [{ severity: "low", title: "Lo" }, { severity: "blocker", title: "Unk" }, { severity: "CRITICAL", title: "Crit" }] }));
+assert.ok(sev.indexOf("[CRITICAL] Crit") < sev.indexOf("[LOW] Lo") && sev.indexOf("[LOW] Lo") < sev.indexOf("[BLOCKER] Unk"));
+
+// setup advertises only aliases that match a current model (agy 1.3 dropped Gemini Pro; `pro` must not be suggested then)
+assert.match(execFileSync("node", [COMPANION, "setup"], { cwd: wrepo, env: wenv, encoding: "utf8" }), /aliases: pro, gemini, opus, claude\)/);
+
+// a broken symlink or vanished file among agy's artifacts must not crash the run (it is collected in the close handler)
+const artHome = fs.mkdtempSync(path.join(os.tmpdir(), "agy-home-"));
+const brain = path.join(artHome, ".gemini", "antigravity-cli", "brain", "art");
+fs.mkdirSync(brain, { recursive: true });
+fs.symlinkSync(path.join(brain, "gone.png"), path.join(brain, "broken.png"));
+fs.writeFileSync(path.join(brain, "pic.png"), "png");
+const artAgy = path.join(tmp, "art-agy");
+fs.writeFileSync(artAgy, `#!/usr/bin/env node
+process.stdin.resume(); process.stdin.on("end", () => console.log(JSON.stringify({event:"result",result:{conversation_id:"art",status:"SUCCESS",response:"drew it"}})));
+`, { mode: 0o755 });
+const img = execFileSync("node", [COMPANION, "image", "a cat"], { cwd: wrepo, env: { ...wenv, AGY_BIN: artAgy, HOME: artHome }, encoding: "utf8" });
+assert.match(img, /# agy image — completed/);
+assert.equal(fs.readFileSync(path.join(wrepo, "agy-images", "pic.png"), "utf8"), "png");
+assert.doesNotMatch(img, /broken\.png/);
+
+// commit/PR reviews warn agy that the checked-out files may be on another revision
+const promptDump = path.join(tmp, "review-prompt");
+const revAgy = path.join(tmp, "rev-agy");
+fs.writeFileSync(revAgy, `#!/usr/bin/env node
+let input = ""; process.stdin.on("data", d => input += d); process.stdin.on("end", () => {
+  require("fs").writeFileSync(${JSON.stringify(promptDump)}, input);
+  console.log(JSON.stringify({event:"result",result:{conversation_id:"r",status:"SUCCESS",response:JSON.stringify({verdict:"approve",summary:"ok",findings:[],next_steps:[]})}})); });
+`, { mode: 0o755 });
+execFileSync("node", [COMPANION, "review", "--commit HEAD"], { cwd: wrepo, env: { ...wenv, AGY_BIN: revAgy }, encoding: "utf8" });
+assert.match(fs.readFileSync(promptDump, "utf8"), /NOTE: the checked-out workspace files may be on a different revision/);
+execFileSync("node", [COMPANION, "review", "--scope working-tree"], { cwd: wrepo, env: { ...wenv, AGY_BIN: revAgy }, encoding: "utf8" });
+assert.doesNotMatch(fs.readFileSync(promptDump, "utf8"), /NOTE: the checked-out/);
+
 console.log("ok");

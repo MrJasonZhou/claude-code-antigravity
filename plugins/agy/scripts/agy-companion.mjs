@@ -26,7 +26,8 @@ const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
 // ---------- args ----------
 
 // Deliberately not full POSIX: a quote only opens at the start of a token and only if it is closed later,
-// so natural-language apostrophes ("don't", "it's") survive; shell-style concatenation ("a"b) is not supported.
+// (or right after a leading --flag=) so natural-language apostrophes ("don't", "it's") survive;
+// shell-style concatenation ("a"b) is not supported.
 export function tokenize(str) {
   const out = [];
   let cur = "", quote = null, has = false;
@@ -36,7 +37,7 @@ export function tokenize(str) {
       if (c === quote) quote = null;
       else if (c === "\\" && quote === '"' && i + 1 < str.length) cur += str[++i];
       else cur += c;
-    } else if ((c === '"' || c === "'") && !has && str.indexOf(c, i + 1) > i) { quote = c; has = true; }
+    } else if ((c === '"' || c === "'") && (!has || /^--[a-z-]+=$/.test(cur)) && str.indexOf(c, i + 1) > i) { quote = c; has = true; }
     else if (/\s/.test(c)) { if (has || cur) out.push(cur); cur = ""; has = false; }
     else if (c === "\\" && i + 1 < str.length) { cur += str[++i]; has = true; }
     else { cur += c; has = true; }
@@ -656,7 +657,7 @@ function collectArtifacts(job) {
   let names = [];
   try { names = fs.readdirSync(dir); } catch { return []; }
   const files = names.filter((n) => !n.startsWith(".") && !n.endsWith(".metadata.json") && n !== "scratch")
-    .map((n) => path.join(dir, n)).filter((p) => fs.statSync(p).isFile());
+    .map((n) => path.join(dir, n)).filter((p) => { try { return fs.statSync(p).isFile(); } catch { return false; } }); // broken symlink / vanished file
   if (job.kind !== "image" || !files.length) return files;
   // Images are copied next to the user's project so Claude and the user can use them directly.
   const out = path.resolve(job.cwd, job.outDir || "agy-images");
@@ -664,8 +665,7 @@ function collectArtifacts(job) {
   return files.map((f) => {
     if (!IMAGE_EXT.test(f)) return f;
     const dest = path.join(out, path.basename(f));
-    fs.copyFileSync(f, dest);
-    return dest;
+    try { fs.copyFileSync(f, dest); return dest; } catch { return f; } // runs in the child's close handler: never throw
   });
 }
 
@@ -678,7 +678,8 @@ export function renderReview(text) {
   const m = /\{[\s\S]*\}/.exec(text || "");
   try { data = JSON.parse(m ? m[0] : text); } catch { return null; }
   if (!data || !Array.isArray(data.findings)) return null;
-  const findings = [...data.findings].sort((a, b) => SEV.indexOf(a.severity) - SEV.indexOf(b.severity));
+  const rank = (f) => { const i = SEV.indexOf(String(f.severity || "").toLowerCase()); return i < 0 ? SEV.length : i; }; // unknown severities last
+  const findings = [...data.findings].sort((a, b) => rank(a) - rank(b));
   const lines = [`**Verdict:** ${data.verdict === "approve" ? "✅ approve" : "⚠️ needs-attention"}`, "", data.summary || ""];
   if (!findings.length) lines.push("", "No findings.");
   findings.forEach((f, i) => {
@@ -965,7 +966,7 @@ async function cmdReview(o, cwd) {
   const ctx = collectReviewContext(cwd, { base: o.base, scope: o.scope, commit: o.commit, pr: o.pr });
   if (ctx.empty) return `Nothing to review: ${ctx.label} is empty.`;
   const root = ctx.root || cwd; // diff paths are repo-relative, so agy works from the repository root
-  const prompt = `${preamble(root, "read", o["add-dir"])}\n\n${reviewInstructions(o.adversarial, o.text)}\n\nCHANGE UNDER REVIEW: ${ctx.label}${ctx.root ? ` (paths are relative to the repository root ${ctx.root})` : ""}\n${ctx.stat ? `\n### STAT\n${ctx.stat}` : ""}\n### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
+  const prompt = `${preamble(root, "read", o["add-dir"])}\n\n${reviewInstructions(o.adversarial, o.text)}\n\nCHANGE UNDER REVIEW: ${ctx.label}${ctx.root ? ` (paths are relative to the repository root ${ctx.root})` : ""}\n${ctx.stat ? `\n### STAT\n${ctx.stat}` : ""}${["pr", "commit"].includes(ctx.scope) ? "\nNOTE: the checked-out workspace files may be on a different revision than this change. Treat the DIFF as the source of truth; use workspace files only as general project context." : ""}\n### DIFF\n${ctx.body}${ctx.truncated ? "\n\n[DIFF TRUNCATED — open the remaining changed files directly]" : ""}`;
   const job = newJob("review", cwd, { ...o, resume: null, "resume-last": false }, "read", prompt, { reviewLabel: ctx.label, truncated: ctx.truncated, adversarial: !!o.adversarial, runCwd: root });
   job.agyArgs.push("--json-schema", REVIEW_SCHEMA);
   return launch(job, o);
@@ -1090,7 +1091,7 @@ function cmdSetup(o, cwd) {
     lines.push(`- authenticated: ${report.authenticated ? "yes" : "NO — run `! agy` once and sign in"}`);
     if (report.quota) lines.push("", "## Quota", "", "| group | window | remaining | resets |", "|---|---|---|---|",
       ...report.quota.split("\n").map((l) => `| ${l.split("\t").join(" | ")} |`));
-    if (report.models.length) lines.push("", "## Models (use with --model, or aliases: gemini, flash, pro, opus, sonnet, gpt)", "", ...report.models.map((m) => `- ${m}`));
+    if (report.models.length) lines.push("", `## Models (use with --model, or aliases: ${[...ALIASES].filter((a) => report.models.some((m) => m.includes(a))).join(", ")})`, "", ...report.models.map((m) => `- ${m}`));
     if (report.error) lines.push("", "## Error", "```", report.error, "```");
   }
   lines.push("", `- stop-time review gate for ${cwd}: ${loadConfig().reviewGate?.[cwd] ? "ENABLED" : "disabled"} (toggle with --enable-review-gate / --disable-review-gate)`);
@@ -1118,7 +1119,9 @@ function resolveTranscript(src) {
   if (path.extname(p) !== ".jsonl") throw new Error(`Claude transcript must be a .jsonl file: ${p}`);
   let real;
   try { real = fs.realpathSync(p); } catch { throw new Error(`Claude transcript not found: ${p} — if this is the first message of the session there is nothing to hand over yet`); }
-  const rel = path.relative(fs.realpathSync(CLAUDE_PROJECTS), real);
+  let projects;
+  try { projects = fs.realpathSync(CLAUDE_PROJECTS); } catch { throw new Error(`no Claude transcripts found (${CLAUDE_PROJECTS} does not exist)`); }
+  const rel = path.relative(projects, real);
   if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`only transcripts under ${CLAUDE_PROJECTS} can be transferred: ${real}`);
   return real;
 }
